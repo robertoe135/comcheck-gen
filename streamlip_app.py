@@ -269,7 +269,7 @@ SAMPLE_SPACES = """Room ID,SquareFootage
 OPEN DESK AREA - 17A01,20
 """
 
-st.markdown("#### Download sample CSV templates to get started. This only works with NYC ECC 2020 at this time.")
+st.markdown("#### Download sample CSV templates to get started. This only works with NYC IECC 2020 at this time.")
 c1, c2 = st.columns(2)
 with c1:
     st.download_button(
