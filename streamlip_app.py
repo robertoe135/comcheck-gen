@@ -251,15 +251,16 @@ def generate_comcheck(fixtures_csv: str, spaces_csv: str) -> str:
     return "\n".join(lines)
 
 # --- Streamlit UI ---
-st.set_page_config(page_title="TDA COMcheck Generator", layout="wide")
+st.set_page_config(page_title="TDA COMcheck Generator")
 logo_url = (
     "https://images.squarespace-cdn.com/"
     "content/v1/651344c15e9ed913545fbbf6/"
     "46e7dba5-6680-4ab9-9745-a0dc87f26000/"
     "TDA+LOGO%2C+JPEG.jpg?format=1500w"
 )
-st.image(logo_url, width=200)
+st.image(logo_url, width=300)
 st.title("TDA COMcheck Generator")
+st.subtitle("This only works for NYC ECC 2020 at this time.")
 
 # Sample CSV templates
 SAMPLE_FIXTURES = """Room ID,Fixture Description,Quantity,Wattage
