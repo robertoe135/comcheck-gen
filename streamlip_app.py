@@ -260,7 +260,6 @@ logo_url = (
 )
 st.image(logo_url, width=300)
 st.title("TDA COMcheck Generator")
-st.subtitle("This only works for NYC ECC 2020 at this time.")
 
 # Sample CSV templates
 SAMPLE_FIXTURES = """Room ID,Fixture Description,Quantity,Wattage
@@ -270,7 +269,7 @@ SAMPLE_SPACES = """Room ID,SquareFootage
 OPEN DESK AREA - 17A01,20
 """
 
-st.markdown("#### Download sample CSV templates to get started")
+st.markdown("#### Download sample CSV templates to get started. This only works with NYC ECC 2020 at this time")
 c1, c2 = st.columns(2)
 with c1:
     st.download_button(
