@@ -268,11 +268,3 @@ if f_uploaded and s_uploaded:
         )
     except Exception as e:
         st.error(f"Error generating COMcheck: {e}")
-
-
-
-
-
-
-
-Ask ChatGPT
