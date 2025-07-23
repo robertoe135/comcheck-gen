@@ -55,7 +55,7 @@ ACTIVITY_TYPE = {
     'Electrical/Mechanical': 'ACTIVITY_COMMON_ELECTRICAL_MECHANICAL'
 }
 
-# Heuristic for space type
+# Heuristic mapping from room name to space type
 
 def guess_type(name: str) -> str:
     n = name.upper()
@@ -77,163 +77,196 @@ def guess_type(name: str) -> str:
         return 'Lobby For Elevator'
     return 'Conference/Meeting/Multipurpose'
 
-# Parse wattage robustly
-def parse_wattage(raw: str) -> float:
-    cleaned = re.sub(r'[^\d.]', '', raw)
-    return float(cleaned) if cleaned else 0.0
+# Robust wattage parsing
 
-# Main generation function
+def parse_wattage(s: str) -> float:
+    num = re.sub(r'[^\d.]', '', s or '')
+    return float(num) if num else 0.0
+
+# Generate COMcheck content
+
 def generate_comcheck(fixtures_csv: str, spaces_csv: str) -> str:
     # Parse spaces.csv
-    reader_s = csv.DictReader(StringIO(spaces_csv), skipinitialspace=True)
-    sf_keys = [k for k in reader_s.fieldnames if k.replace(" ", "").lower() == "squarefootage"]
+    reader_s = csv.DictReader(StringIO(spaces_csv))
+    sf_keys = [k for k in reader_s.fieldnames or [] if k.replace(' ', '').lower() == 'squarefootage']
     if not sf_keys:
-        raise ValueError(f"spaces.csv must have a 'SquareFootage' column; found {reader_s.fieldnames}")
-    sf_key = sf_keys[0]
-    spaces = {row['Room ID']: float(row[sf_key]) for row in reader_s}
+        raise ValueError(f"spaces.csv needs a SquareFootage column, found {reader_s.fieldnames}")
+    sqm = sf_keys[0]
+    spaces = {r['Room ID']: float(r[sqm]) for r in reader_s}
 
-    # Parse fixtures.csv and allowances
-    reader_f = csv.DictReader(StringIO(fixtures_csv), skipinitialspace=True)
+    # Parse fixtures.csv
+    reader_f = csv.DictReader(StringIO(fixtures_csv))
     fixtures = defaultdict(lambda: defaultdict(int))
     watt_map = {}
-    allowance_map = {}
-    for row in reader_f:
-        room = row['Room ID']
-        fix  = row['Fixture Description']
-        qty  = int(float(row['Quantity']))
-        w    = parse_wattage(row['Wattage'])
-        fixtures[room][fix] += qty
-        watt_map[fix] = w
-        # collect decorative allowances if provided
-        if row.get('AllowanceType', '').strip():
-            allowance_map[fix] = {
-                'type': row['AllowanceType'].strip(),
-                'description': row.get('AllowanceDescription', '').strip(),
-                'factor': row.get('PowerAllowanceFactor', '').strip(),
-                'area': row.get('AllowanceFloorArea', '').strip()
-            }
+    allowance = {}
+    for r in reader_f:
+        room = r['Room ID']; fix = r['Fixture Description']
+        qty = int(float(r['Quantity'])); w = parse_wattage(r.get('Wattage',''))
+        fixtures[room][fix] += qty; watt_map[fix] = w
+        # decorative allowance support
+        if r.get('AllowanceType'):
+            allowance.setdefault((room,fix), {}).update({
+                'type': r.get('AllowanceType',''),
+                'description': r.get('AllowanceDescription',''),
+                'factor': r.get('PowerAllowanceFactor',''),
+                'area': r.get('AllowanceFloorArea','')
+            })
 
-    # Build static header
-    lines = [
-        "WARNING: Do Not Modify This File!",
-        "Check 24.1.6 Data File",
-        "CONTROL 1 (",
-        "  code = CEZ_NYSTRETCH_NYC_IECC2018",
-        "  compliance mode = UA",
-        "  version = 24.1.6 )",
-        "LOCATION 1 (",
-        "  state = New York",
-        "  city = New York )",
-        "BUILDING 1 (",
-        "  project type = NEW_CONSTRUCTION",
-        "  bldg use type = ACTIVITY",
-        "  feet bldg height = 0.000",
-        "  number of stories = 1",
-        "  is nonresidential conditioning = TRUE",
-        "  is residential conditioning = FALSE",
-        "  is semiheated conditioning = FALSE",
-        "  conditioning = HEATING_AND_COOLING)",
-        "ENVELOPE 1 (",
-        "  use orient details = TRUE",
-        "  use vlt details = FALSE",
-        "  use cool roof performance details = FALSE",
-        "  air barrier compliance type = AIR_BARRIER_OPTION_UNKNOWN",
-        "  apply window pct allowance for daylighting = FALSE",
-        "  apply skylight pct allowance for daylighting = FALSE )",
-        "LIGHTING 1 (",
-        "  exterior lighting zone = 0 ",
-        "  exterior lighting zone type = EXT_ZONE_UNSPECIFIED )"
-    ]
+    lines = []
+    # Header
+    lines.extend([
+        'WARNING: Do Not Modify This File!',
+        'Check 24.1.6 Data File',
+        'CONTROL 1 (',
+        '  code = CEZ_NYSTRETCH_NYC_IECC2018',
+        '  compliance mode = UA',
+        '  version = 24.1.6 )',
+        'LOCATION 1 (',
+        '  state = New York',
+        '  city = New York )',
+        'BUILDING 1 (',
+        '  project type = NEW_CONSTRUCTION',
+        '  bldg use type = ACTIVITY',
+        '  feet bldg height = 0.000',
+        '  number of stories = 1',
+        '  is nonresidential conditioning = TRUE',
+        '  is residential conditioning = FALSE',
+        '  is semiheated conditioning = FALSE',
+        '  conditioning = HEATING_AND_COOLING)',
+        'ENVELOPE 1 (',
+        '  use orient details = TRUE',
+        '  use vlt details = FALSE',
+        '  use cool roof performance details = FALSE',
+        '  air barrier compliance type = AIR_BARRIER_OPTION_UNKNOWN',
+        '  apply window pct allowance for daylighting = FALSE',
+        '  apply skylight pct allowance for daylighting = FALSE )',
+        'LIGHTING 1 (',
+        '  exterior lighting zone = 0 ',
+        '  exterior lighting zone type = EXT_ZONE_UNSPECIFIED )'
+    ])
 
-    # INTERIOR SPACE blocks
-    for idx, (room, sqft) in enumerate(spaces.items(), start=1):
-        ctype = guess_type(room)
-        cat   = CATEGORY_MAP[ctype]
-        allowed = POWER_DENSITY[cat]
-        total_w = sum(q * watt_map[f] for f, q in fixtures.get(room, {}).items())
-        lines += [
-            f"INTERIOR SPACE {idx} (",
-            f"  description = <|{room} ( Common Space Types:{ctype} {sqft} sq.ft.)|>",
-            "  space type = SPACE_INTERIOR_LIGHTING",
-            f"  space allowed wattage = {allowed}",
-            f"  space prop wattage = {int(total_w)}",
-            f"  list position = {idx}",
-            "  allowance description = None",
-            "  allowance type = ALLOWANCE_NONE",
-            "  allowance floor area = 0",
-            "  rcr perimeter = 0",
-            "  rcr floor to workplane height = 0",
-            "  rcr workplane to luminaire height = 0",
-            f"  activity category number = {cat}",
-            ")"
-        ]
+    # Interior spaces
+    for i,(room,sqft) in enumerate(spaces.items(),1):
+        stype=guess_type(room); cat=CATEGORY_MAP[stype]; allow=POWER_DENSITY[cat]
+        prop=int(sum(q*watt_map[f] for f,q in fixtures[room].items()))
+        lines.extend([
+            f'INTERIOR SPACE {i} (',
+            f'  description = <|{room} ( Common Space Types:{stype} {sqft} sq.ft.)|>',
+            '  space type = SPACE_INTERIOR_LIGHTING',
+            f'  space allowed wattage = {allow}',
+            f'  space prop wattage = {prop}',
+            f'  list position = {i}',
+            '  allowance description = None',
+            '  allowance type = ALLOWANCE_NONE',
+            '  allowance floor area = 0',
+            '  rcr perimeter = 0',
+            '  rcr floor to workplane height = 0',
+            '  rcr workplane to luminaire height = 0',
+            f'  activity category number = {cat}',
+            ')'
+        ])
 
-    # FIXTURE blocks (aggregated)
-    fid = len(spaces) + 1
-    for idx, room in enumerate(spaces, start=1):
-        for fix, qty in fixtures.get(room, {}).items():
-            w = int(watt_map.get(fix, 0))
-            lines += [
-                f"FIXTURE {fid} (",
-                f"  list position = {idx}",
-                "  fixture use type = FIXTURE_USE_INTERIOR",
-                "  power adjustment factor = 0.000",
-                "  paf desc = None",
-                "  lamp wattage = 0.00",
-                "  lighting type = LED",
-                "  type of fixture = <||>",
-                f"  description = <|{fix}|>",
-                f"  fixture type = <|{fix}|>",
-                f"  parent number = {idx}",
-                "  lamp ballast description = <||>",
-                "  lamp type = Other",
-                "  ballast = UNSPECIFIED_BALLAST",
-                "  number of lamps = 1",
-                f"  fixture wattage = {w}"            ]
-            # Add decorative allowance lines if present
-            if fix in allowance_map:
-                alw = allowance_map[fix]
-                lines += [
-                    f"  allowance type = {alw['type']}",
-                    f"  allowance description = {alw['description']}",
-                    f"  power allowance factor = {alw['factor']}",
-                    f"  allowance floor area = {alw['area']}"
-                ]
-            lines += [
-                f"  quantity = {qty}",
-                ")"
-            ]
-            fid += 1
+    # Fixtures
+    fid=len(spaces)+1
+    for i,room in enumerate(spaces,1):
+        for fix,qty in fixtures[room].items():
+            w=int(watt_map.get(fix,0))
+            lines.append(f'FIXTURE {fid} (')
+            lines.extend([
+                f'  list position = {i}',
+                '  fixture use type = FIXTURE_USE_INTERIOR',
+                '  power adjustment factor = 0.000',
+                '  paf desc = None',
+                '  lamp wattage = 0.00',
+                '  lighting type = LED',
+                '  type of fixture = <||>',
+                f'  description = <|{fix}|>',
+                f'  fixture type = <|{fix}|>',
+                f'  parent number = {i}',
+                '  lamp ballast description = <||>',
+                '  lamp type = Other',
+                '  ballast = UNSPECIFIED_BALLAST',
+                '  number of lamps = 1',
+                f'  fixture wattage = {w}'
+            ])
+            # decorative allowances
+            key=(room,fix)
+            if key in allowance:
+                al=allowance[key]
+                lines.extend([
+                    f'  allowance type = {al["type"]}',
+                    f'  allowance description = {al["description"]}',
+                    f'  power allowance factor = {al["factor"]}',
+                    f'  allowance floor area = {al["area"]}'
+                ])
+            lines.append(f'  quantity = {qty}')
+            lines.append(')')
+            fid+=1
 
-    # ACTIVITY USE blocks
-    for idx, room in enumerate(spaces, start=1):
-        ctype = guess_type(room)
-        cat   = CATEGORY_MAP[ctype]
-        dtype = ACTIVITY_TYPE[ctype]
-        pd    = POWER_DENSITY[cat]
-        sqft  = spaces[room]
-        lines += [
-            f"ACTIVITY USE {idx} (",
-            f"  key = {1000000000 + idx}",
-            f"  activity type = {dtype}",
-            f"  activity description = <|Common Space Types:{ctype}|>",
-            f"  area description = <|{room}|>",
-            f"  power density = {pd}",
-            "  ceiling height = 0",
-            "  internal load = 1.95",
-            f"  list position = {idx}",
-            "  area factor = 1",
-            "  construction type = NON_RESIDENTIAL",
-            f"  floor area = {sqft}",
-            ")"
-        ]
+    # Activity use
+    for i,room in enumerate(spaces,1):
+        stype=guess_type(room); cat=CATEGORY_MAP[stype]; dtype=ACTIVITY_TYPE[stype]; pd=POWER_DENSITY[cat]; sq=spaces[room]
+        lines.extend([
+            f'ACTIVITY USE {i} (',
+            f'  key = {1000000000+i}',
+            f'  activity type = {dtype}',
+            f'  activity description = <|Common Space Types:{stype}|>',
+            f'  area description = <|{room}|>',
+            f'  power density = {pd}',
+            '  ceiling height = 0',
+            '  internal load = 1.95',
+            f'  list position = {i}',
+            '  area factor = 1',
+            '  construction type = NON_RESIDENTIAL',
+            f'  floor area = {sq}',
+            ')'
+        ])
 
-    # Static PROJECT/WHOLE BLDG USE/EXTERIOR USE
-    lines += [
-        "PROJECT 1 (",
-        "  project complete = FALSE",
-        ")",
-        "WHOLE BLDG USE 2 (",
-        "  whole bldg type = WHOLE_BUILDING_INVALID_USE",
-        "  key = 587260110",
-        "
+    # Static sections
+    lines.extend([
+        'PROJECT 1 (','  project complete = FALSE',')',
+        'WHOLE BLDG USE 2 (','  whole bldg type = WHOLE_BUILDING_INVALID_USE',
+        '  key = 587260110','  whole bldg description = <||>','  area description = <||>',
+        '  power density = 0','  internal load = 0','  ceiling height = 0',
+        '  list position = 1','  construction type = NON_RESIDENTIAL','  floor area = 0',')',
+        'EXTERIOR USE 1 (','  key = 1417866914','  exterior type = EXTERIOR_INVALID_USE',
+        '  exterior description = <||>','  area description = <||>','  power density = 0',
+        '  use quantity = 0','  quantity units = <||>','  is tradable = FALSE',')'
+    ])
+
+    # Requirements
+    for n in range(1,21):
+        lines.extend([
+            f'REQUIREMENT ANSWER {n} (',
+            '  requirement = <|PR4_IECC2018_C_C103.2|>' if n==1 else '  requirement = <|EL26_IECC2018_C_C405.6|>',
+            '  category = INTERIOR LIGHTING' if n<=13 else '  category = PROJECT',
+            '  exception name = <||>','  location on plans = <||>','  status = NOT_SATISFIED',')'
+        ])
+
+    return '\n'.join(lines)
+
+# Streamlit UI
+st.set_page_config(page_title='TDA COMcheck Generator', layout='wide')
+st.image('https://images.squarespace-cdn.com/content/v1/651344c15e9ed913545fbbf6/46e7dba5-6680-4ab9-9745-a0dc87f26000/TDA+LOGO%2C+JPEG.jpg?format=1500w', width=200)
+st.title('TDA COMcheck Generator')
+
+# Sample CSV templates
+S_F = 'Room ID,Fixture Description,Quantity,Wattage,AllowanceType,AllowanceDescription,PowerAllowanceFactor,AllowanceFloorArea\nOPEN DESK AREA - 17A01,TB-4,2,6 W,ALLOWANCE_NONE,,,'
+S_S = 'Room ID,SquareFootage\nOPEN DESK AREA - 17A01,20'
+col1, col2 = st.columns(2)
+with col1:
+    st.download_button('Fixtures template', S_F, 'fixtures_template.csv', 'text/csv')
+with col2:
+    st.download_button('Spaces template'  , S_S, 'spaces_template.csv'  , 'text/csv')
+
+# File inputs
+output_filename = st.text_input('Output filename:', 'TDA_Generated ComCheck File.cck')
+f_up = st.file_uploader('Upload fixtures.csv', type='csv')
+s_up = st.file_uploader('Upload spaces.csv',   type='csv')
+
+if f_up and s_up:
+    try:
+        txt = generate_comcheck(f_up.getvalue().decode('utf-8-sig'), s_up.getvalue().decode('utf-8-sig'))
+        st.download_button('Download COMcheck file', txt, output_filename, 'text/plain')
+    except Exception as e:
+        st.error(f'Error: {e}')
