@@ -55,8 +55,9 @@ ACTIVITY_TYPE = {
     'Electrical/Mechanical': 'ACTIVITY_COMMON_ELECTRICAL_MECHANICAL'
 }
 
+# Heuristic for space type
+
 def guess_type(name: str) -> str:
-    """Heuristic mapping from Room ID to space type."""
     n = name.upper()
     if 'OPEN DESK' in n:
         return 'Office - Open Plan'
@@ -76,11 +77,12 @@ def guess_type(name: str) -> str:
         return 'Lobby For Elevator'
     return 'Conference/Meeting/Multipurpose'
 
+# Parse wattage robustly
 def parse_wattage(raw: str) -> float:
-    """Extract numeric wattage from a string, stripping 'W' or any non-digit."""
     cleaned = re.sub(r'[^\d.]', '', raw)
     return float(cleaned) if cleaned else 0.0
 
+# Main generation function
 def generate_comcheck(fixtures_csv: str, spaces_csv: str) -> str:
     # Parse spaces.csv
     reader_s = csv.DictReader(StringIO(spaces_csv), skipinitialspace=True)
@@ -90,10 +92,11 @@ def generate_comcheck(fixtures_csv: str, spaces_csv: str) -> str:
     sf_key = sf_keys[0]
     spaces = {row['Room ID']: float(row[sf_key]) for row in reader_s}
 
-    # Parse fixtures.csv
+    # Parse fixtures.csv and allowances
     reader_f = csv.DictReader(StringIO(fixtures_csv), skipinitialspace=True)
     fixtures = defaultdict(lambda: defaultdict(int))
     watt_map = {}
+    allowance_map = {}
     for row in reader_f:
         room = row['Room ID']
         fix  = row['Fixture Description']
@@ -101,6 +104,14 @@ def generate_comcheck(fixtures_csv: str, spaces_csv: str) -> str:
         w    = parse_wattage(row['Wattage'])
         fixtures[room][fix] += qty
         watt_map[fix] = w
+        # collect decorative allowances if provided
+        if row.get('AllowanceType', '').strip():
+            allowance_map[fix] = {
+                'type': row['AllowanceType'].strip(),
+                'description': row.get('AllowanceDescription', '').strip(),
+                'factor': row.get('PowerAllowanceFactor', '').strip(),
+                'area': row.get('AllowanceFloorArea', '').strip()
+            }
 
     # Build static header
     lines = [
@@ -137,7 +148,7 @@ def generate_comcheck(fixtures_csv: str, spaces_csv: str) -> str:
     # INTERIOR SPACE blocks
     for idx, (room, sqft) in enumerate(spaces.items(), start=1):
         ctype = guess_type(room)
-        cat = CATEGORY_MAP[ctype]
+        cat   = CATEGORY_MAP[ctype]
         allowed = POWER_DENSITY[cat]
         total_w = sum(q * watt_map[f] for f, q in fixtures.get(room, {}).items())
         lines += [
@@ -178,7 +189,17 @@ def generate_comcheck(fixtures_csv: str, spaces_csv: str) -> str:
                 "  lamp type = Other",
                 "  ballast = UNSPECIFIED_BALLAST",
                 "  number of lamps = 1",
-                f"  fixture wattage = {w}",
+                f"  fixture wattage = {w}"            ]
+            # Add decorative allowance lines if present
+            if fix in allowance_map:
+                alw = allowance_map[fix]
+                lines += [
+                    f"  allowance type = {alw['type']}",
+                    f"  allowance description = {alw['description']}",
+                    f"  power allowance factor = {alw['factor']}",
+                    f"  allowance floor area = {alw['area']}"
+                ]
+            lines += [
                 f"  quantity = {qty}",
                 ")"
             ]
@@ -187,10 +208,10 @@ def generate_comcheck(fixtures_csv: str, spaces_csv: str) -> str:
     # ACTIVITY USE blocks
     for idx, room in enumerate(spaces, start=1):
         ctype = guess_type(room)
-        cat = CATEGORY_MAP[ctype]
+        cat   = CATEGORY_MAP[ctype]
         dtype = ACTIVITY_TYPE[ctype]
-        pd = POWER_DENSITY[cat]
-        sqft = spaces[room]
+        pd    = POWER_DENSITY[cat]
+        sqft  = spaces[room]
         lines += [
             f"ACTIVITY USE {idx} (",
             f"  key = {1000000000 + idx}",
@@ -207,7 +228,7 @@ def generate_comcheck(fixtures_csv: str, spaces_csv: str) -> str:
             ")"
         ]
 
-    # Static PROJECT, WHOLE BLDG USE, EXTERIOR USE sections
+    # Static PROJECT/WHOLE BLDG USE/EXTERIOR USE
     lines += [
         "PROJECT 1 (",
         "  project complete = FALSE",
@@ -215,94 +236,4 @@ def generate_comcheck(fixtures_csv: str, spaces_csv: str) -> str:
         "WHOLE BLDG USE 2 (",
         "  whole bldg type = WHOLE_BUILDING_INVALID_USE",
         "  key = 587260110",
-        "  whole bldg description = <||>",
-        "  area description = <||>",
-        "  power density = 0",
-        "  internal load = 0",
-        "  ceiling height = 0",
-        "  list position = 1",
-        "  construction type = NON_RESIDENTIAL",
-        "  floor area = 0",
-        ")",
-        "EXTERIOR USE 1 (",
-        "  key = 1417866914",
-        "  exterior type = EXTERIOR_INVALID_USE",
-        "  exterior description = <||>",
-        "  area description = <||>",
-        "  power density = 0",
-        "  use quantity = 0",
-        "  quantity units = <||>",
-        "  is tradable = FALSE",
-        ")"
-    ]
-
-    # REQUIREMENT ANSWER blocks
-    for n in range(1, 21):
-        lines += [
-            f"REQUIREMENT ANSWER {n} (",
-            "  requirement = <|PR4_IECC2018_C_C103.2|>" if n == 1 else "  requirement = <|EL26_IECC2018_C_C405.6|>",
-            "  category = INTERIOR LIGHTING" if n <= 13 else "  category = PROJECT",
-            "  exception name = <||>",
-            "  location on plans = <||>",
-            "  status = NOT_SATISFIED",
-            ")"
-        ]
-
-    return "\n".join(lines)
-
-# --- Streamlit UI ---
-st.set_page_config(page_title="TDA COMcheck Generator")
-logo_url = (
-    "https://images.squarespace-cdn.com/"
-    "content/v1/651344c15e9ed913545fbbf6/"
-    "46e7dba5-6680-4ab9-9745-a0dc87f26000/"
-    "TDA+LOGO%2C+JPEG.jpg?format=1500w"
-)
-st.image(logo_url, width=300)
-st.title("TDA COMcheck Generator")
-
-# Sample CSV templates
-SAMPLE_FIXTURES = """Room ID,Fixture Description,Quantity,Wattage
-OPEN DESK AREA - 17A01,TB-4,2,6 W
-"""
-SAMPLE_SPACES = """Room ID,SquareFootage
-OPEN DESK AREA - 17A01,20
-"""
-
-st.markdown("#### Download sample CSV templates to get started. This only works with NYC IECC 2020 at this time.")
-c1, c2 = st.columns(2)
-with c1:
-    st.download_button(
-        "Sample fixtures.csv",
-        data=SAMPLE_FIXTURES,
-        file_name="fixtures_template.csv",
-        mime="text/csv"
-    )
-with c2:
-    st.download_button(
-        "Sample spaces.csv",
-        data=SAMPLE_SPACES,
-        file_name="spaces_template.csv",
-        mime="text/csv"
-    )
-
-# User inputs
-output_filename = st.text_input("Output filename:", "TDA_Generated ComCheck File.cck")
-f_uploaded = st.file_uploader("Upload fixtures.csv", type="csv")
-s_uploaded = st.file_uploader("Upload spaces.csv", type="csv")
-
-# Generate and download
-if f_uploaded and s_uploaded:
-    try:
-        comcheck_text = generate_comcheck(
-            f_uploaded.getvalue().decode("utf-8-sig"),
-            s_uploaded.getvalue().decode("utf-8-sig")
-        )
-        st.download_button(
-            "Download COMcheck file",
-            data=comcheck_text,
-            file_name=output_filename,
-            mime="text/plain"
-        )
-    except Exception as e:
-        st.error(f"Error generating COMcheck: {e}")
+        "
