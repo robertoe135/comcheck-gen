@@ -1,3 +1,4 @@
+```python
 import streamlit as st
 import csv
 import re
@@ -315,3 +316,4 @@ if f_up and s_up:
         st.download_button("Download COMcheck file", comcheck_text, output_filename, "text/plain")
     except Exception as e:
         st.error(f"Error generating COMcheck: {e}")
+```
