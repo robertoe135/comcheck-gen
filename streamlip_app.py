@@ -2,7 +2,7 @@ import streamlit as st
 import csv
 import re
 from io import StringIO
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 
 # --- Mapping tables ---
 CATEGORY_MAP = {
@@ -56,7 +56,6 @@ ACTIVITY_TYPE = {
 }
 
 # --- Helper functions ---
-
 def guess_space_type(name: str) -> str:
     n = name.upper()
     if 'OPEN DESK' in n:
@@ -82,9 +81,8 @@ def parse_wattage(raw: str) -> float:
     num = re.sub(r'[^\d.]', '', raw or '')
     return float(num) if num else 0.0
 
-# --- Generation helpers ---
-
-def generate_header():
+# --- Generation sections ---
+def generate_header() -> list:
     return [
         "WARNING: Do Not Modify This File!",
         "Check 24.1.6 Data File",
@@ -117,7 +115,7 @@ def generate_header():
     ]
 
 
-def generate_static_sections():
+def generate_static_sections() -> list:
     return [
         "PROJECT 1 (",
         "  project complete = FALSE",
@@ -147,7 +145,7 @@ def generate_static_sections():
     ]
 
 
-def generate_requirement_answers():
+def generate_requirement_answers() -> list:
     lines = []
     for n in range(1, 21):
         req = '<|PR4_IECC2018_C_C103.2|>' if n == 1 else '<|EL26_IECC2018_C_C405.6|>'
@@ -165,21 +163,18 @@ def generate_requirement_answers():
 
 
 def generate_comcheck(fixtures_csv: str, spaces_csv: str) -> str:
-    # Parse spaces in order
+    # Parse spaces.csv (ordered)
     reader_s = csv.DictReader(StringIO(spaces_csv), skipinitialspace=True)
     sf_key = next((k for k in reader_s.fieldnames if k.replace(' ', '').lower() == 'squarefootage'), None)
     if sf_key is None:
         raise ValueError(f"spaces.csv must have a 'SquareFootage' column; found {reader_s.fieldnames}")
-    rooms = []  # ordered list of room names
-    spaces = {}
+    rooms = OrderedDict()
     for row in reader_s:
-        room = row['Room ID']
-        sqft = float(row[sf_key])
-        rooms.append(room)
-        spaces[room] = sqft
-    room_index = {room: i for i, room in enumerate(rooms, start=1)}
-
-    # Parse fixtures and allowances
+        rooms[row['Room ID']] = float(row[sf_key])
+    # Map room -> interior index
+    room_to_index = {room: idx for idx, room in enumerate(rooms, start=1)}
+    
+    # Parse fixtures.csv
     reader_f = csv.DictReader(StringIO(fixtures_csv), skipinitialspace=True)
     fixtures = defaultdict(lambda: defaultdict(lambda: {'qty': 0, 'watt': 0.0, 'allowance': {}}))
     for row in reader_f:
@@ -189,7 +184,6 @@ def generate_comcheck(fixtures_csv: str, spaces_csv: str) -> str:
         w    = parse_wattage(row.get('Wattage', ''))
         fixtures[room][fix]['qty'] += qty
         fixtures[room][fix]['watt'] = w
-        # decorative allowance
         if row.get('AllowanceType'):
             fixtures[room][fix]['allowance'] = {
                 'type': row.get('AllowanceType',''),
@@ -198,18 +192,17 @@ def generate_comcheck(fixtures_csv: str, spaces_csv: str) -> str:
                 'area': row.get('AllowanceFloorArea','')
             }
 
-    # Build COMcheck content
     lines = []
+    # Header
     lines.extend(generate_header())
 
     # INTERIOR SPACE blocks
-    for room in rooms:
-        idx = room_index[room]
-        sqft = spaces[room]
+    for room, sqft in rooms.items():
+        idx = room_to_index[room]
         ctype = guess_space_type(room)
-        cat = CATEGORY_MAP[ctype]
+        cat   = CATEGORY_MAP[ctype]
         allowed = POWER_DENSITY[cat]
-        total_w = int(sum(info['qty'] * info['watt'] for info in fixtures[room].values()))
+        total_w = int(sum(info['qty'] * info['watt'] for info in fixtures.get(room, {}).values()))
         lines.extend([
             f"INTERIOR SPACE {idx} (",
             f"  description = <|{room} ( Common Space Types:{ctype} {sqft} sq.ft.)|>",
@@ -228,30 +221,30 @@ def generate_comcheck(fixtures_csv: str, spaces_csv: str) -> str:
         ])
 
     # FIXTURE blocks
-    fid = len(rooms) + 1
+    fixture_id_start = len(rooms) + 1
+    fid = fixture_id_start
     for room in rooms:
-        idx = room_index[room]
-        for fdesc, info in fixtures[room].items():
+        parent_i = room_to_index[room]
+        for fix, info in fixtures.get(room, {}).items():
             lines.append(f"FIXTURE {fid} (")
             lines.extend([
-                f"  list position = {idx}",
+                f"  list position = {parent_i}",
                 "  fixture use type = FIXTURE_USE_INTERIOR",
                 "  power adjustment factor = 0.000",
                 "  paf desc = None",
                 "  lamp wattage = 0.00",
                 "  lighting type = LED",
                 "  type of fixture = <||>",
-                f"  description = <|{fdesc}|>",
-                f"  fixture type = <|{fdesc}|>",
-                f"  parent number = {idx}",
+                f"  description = <|{fix}|>",
+                f"  fixture type = <|{fix}|>",
+                f"  parent number = {parent_i}",
                 "  lamp ballast description = <||>",
                 "  lamp type = Other",
                 "  ballast = UNSPECIFIED_BALLAST",
                 "  number of lamps = 1",
                 f"  fixture wattage = {int(info['watt'])}"
             ])
-            # decorative allowance
-            alw = info['allowance']
+            alw = info.get('allowance', {})
             if alw:
                 lines.extend([
                     f"  allowance type = {alw['type']}",
@@ -266,13 +259,12 @@ def generate_comcheck(fixtures_csv: str, spaces_csv: str) -> str:
             fid += 1
 
     # ACTIVITY USE blocks
-    for room in rooms:
-        idx = room_index[room]
+    for room, sqft in rooms.items():
+        idx = room_to_index[room]
         ctype = guess_space_type(room)
-        cat = CATEGORY_MAP[ctype]
+        cat   = CATEGORY_MAP[ctype]
         act_code = ACTIVITY_TYPE[ctype]
-        pd = POWER_DENSITY[cat]
-        sqft = spaces[room]
+        pd    = POWER_DENSITY[cat]
         lines.extend([
             f"ACTIVITY USE {idx} (",
             f"  key = {1000000000 + idx}",
@@ -289,9 +281,8 @@ def generate_comcheck(fixtures_csv: str, spaces_csv: str) -> str:
             ")"
         ])
 
-    # Static PROJECT/WHOLE BLDG/EXTERIOR
-    lines.extend(generate_static_sections())
-    # Requirements
+    # Static sections & requirements
+    lines.extend(generate_static sections())
     lines.extend(generate_requirement_answers())
 
     return "\n".join(lines)
@@ -310,18 +301,16 @@ with col1:
 with col2:
     st.download_button("Spaces template"  , SAMPLE_SPACES  , "spaces_template.csv"  , "text/csv")
 
-# Inputs
+# User inputs & generate
 output_filename = st.text_input("Output filename:", "TDA_Generated ComCheck File.cck")
 f_up = st.file_uploader("Upload fixtures.csv", type="csv")
 s_up = st.file_uploader("Upload spaces.csv",   type="csv")
-
-# Generate and download
 if f_up and s_up:
     try:
-        result = generate_comcheck(
+        txt = generate_comcheck(
             f_up.getvalue().decode("utf-8-sig"),
             s_up.getvalue().decode("utf-8-sig")
         )
-        st.download_button("Download COMcheck file", result, output_filename, "text/plain")
+        st.download_button("Download COMcheck file", txt, output_filename, "text/plain")
     except Exception as e:
-        st.error(f"Error generating COMcheck: {e}")
+        st.error(f"Error: {e}")
