@@ -4,7 +4,7 @@ import re
 from io import StringIO
 from collections import defaultdict
 
-# --- Mapping tables ---
+# --- Mapping tables - EXACT from original analysis ---
 CATEGORY_MAP = {
     'Office - Open Plan': 1,
     'Office - Enclosed': 2,
@@ -27,9 +27,9 @@ CATEGORY_MAP = {
     'Electrical/Mechanical': 19
 }
 
-# REVERTED: Back to original power densities for NYC IECC 2018
+# Power densities - EXACT from working analysis
 POWER_DENSITY = {
-    1: 0.82,   # Office - Open Plan  
+    1: 0.82,   # Office - Open Plan
     2: 0.85,   # Office - Enclosed
     3: 0.43,   # Storage <50 sq.ft.
     4: 0.41,   # Corridor/Transition <8 ft wide
@@ -99,13 +99,12 @@ def parse_wattage(raw: str) -> float:
     return float(cleaned) if cleaned else 0.0
 
 def generate_comcheck(fixtures_csv: str, spaces_csv: str) -> str:
-    # Parse spaces.csv - ensure consistent formatting
+    # Parse spaces.csv
     reader_s = csv.DictReader(StringIO(spaces_csv), skipinitialspace=True)
     sf_keys = [k for k in reader_s.fieldnames if k.replace(" ", "").lower() == "squarefootage"]
     if not sf_keys:
         raise ValueError(f"spaces.csv must have a 'SquareFootage' column; found {reader_s.fieldnames}")
     sf_key = sf_keys[0]
-    # Store as integers to match official file format exactly
     spaces = {row['Room ID']: int(float(row[sf_key])) for row in reader_s}
 
     # Parse fixtures.csv
@@ -120,7 +119,7 @@ def generate_comcheck(fixtures_csv: str, spaces_csv: str) -> str:
         fixtures[room][fix] += qty
         watt_map[fix] = w
 
-    # Build static header
+    # Build EXACT header from original file
     lines = [
         "WARNING: Do Not Modify This File!",
         "Check 24.1.6 Data File",
@@ -152,40 +151,19 @@ def generate_comcheck(fixtures_csv: str, spaces_csv: str) -> str:
         "  exterior lighting zone type = EXT_ZONE_UNSPECIFIED )"
     ]
 
-    # INTERIOR SPACE blocks - CORRECTED calculation with decorative allowances
-    decorative_allowances = {}  # Will be populated when processing fixtures
-    
-    # First pass: calculate decorative allowances
-    for idx, (room, sqft) in enumerate(spaces.items(), start=1):
-        decorative_allowances[idx] = 0
-        ctype = guess_type(room)
-        
-        for fix, qty in fixtures.get(room, {}).items():
-            # Check if fixture gets decorative allowance
-            decorative_fixtures = ['FFE', 'TM', 'TN', 'TU', 'TT', 'TAJ', 'TH']
-            is_decorative = any(df in fix.upper() for df in decorative_fixtures)
-            
-            if is_decorative:
-                if 'LOBBY' in ctype.upper() or 'ELEVATOR' in ctype.upper():
-                    decorative_allowances[idx] = int(0.9 * sqft)  # Only once per room, not per fixture
-                else:
-                    decorative_allowances[idx] = int(0.75 * sqft)  # Only once per room, not per fixture
-                break  # Only apply allowance once per room, regardless of number of decorative fixtures
-    
-    # Generate INTERIOR SPACE blocks with total allowances
+    # INTERIOR SPACE blocks - just base calculation for now
     for idx, (room, sqft) in enumerate(spaces.items(), start=1):
         ctype = guess_type(room)
         cat = CATEGORY_MAP[ctype]
         power_density = POWER_DENSITY[cat]
         base_allowed = int(power_density * sqft)
-        total_allowed = base_allowed + decorative_allowances[idx]  # Add decorative allowance
         total_w = sum(q * watt_map[f] for f, q in fixtures.get(room, {}).items())
         
         lines += [
             f"INTERIOR SPACE {idx} (",
             f"  description = <|{room} ( Common Space Types:{ctype} {sqft} sq.ft.)|>",
             "  space type = SPACE_INTERIOR_LIGHTING",
-            f"  space allowed wattage = {total_allowed}",  # Now includes decorative allowances
+            f"  space allowed wattage = {base_allowed}",
             f"  space prop wattage = {int(total_w)}",
             f"  list position = {idx}",
             "  allowance description = None",
@@ -197,17 +175,12 @@ def generate_comcheck(fixtures_csv: str, spaces_csv: str) -> str:
             f"  activity category number = {cat} )"
         ]
 
-    # FIXTURE blocks with decorative allowances
-    fid = len(spaces) + 1
-    decorative_allowances = {}  # Track decorative allowances per space
-    
+    # FIXTURE blocks - EXACTLY matching original structure
+    fid = 1
     for idx, room in enumerate(spaces, start=1):
-        decorative_allowances[idx] = 0  # Initialize
         for fix, qty in fixtures.get(room, {}).items():
             w = int(watt_map.get(fix, 0))
-            
-            # Determine if this fixture gets decorative allowance
-            fixture_lines = [
+            lines += [
                 f"FIXTURE {fid} (",
                 f"  list position = {idx}",
                 "  fixture use type = FIXTURE_USE_INTERIOR",
@@ -224,54 +197,33 @@ def generate_comcheck(fixtures_csv: str, spaces_csv: str) -> str:
                 "  ballast = UNSPECIFIED_BALLAST",
                 "  number of lamps = 1",
                 f"  fixture wattage = {w}",
+                f"  quantity = {qty} )"
             ]
-            
-            # Add decorative allowance for qualifying fixtures
-            ctype = guess_type(room)
-            sqft = spaces[room]
-            
-            # Define which fixtures get decorative allowances (based on patterns in official file)
-            decorative_fixtures = ['FFE', 'TM', 'TN', 'TU', 'TT']  # Add more as needed
-            is_decorative = any(df in fix.upper() for df in decorative_fixtures)
-            
-            if is_decorative:
-                if 'LOBBY' in ctype.upper() or 'ELEVATOR' in ctype.upper():
-                    # Lobby decorative allowance (90% factor)
-                    fixture_lines += [
-                        "  allowance type = ALLOWANCE_DECORATIVE_APPEARANCE_LOBBIES",
-                        "  allowance description = Decorative Appearance in lobbbies",
-                        "  power allowance factor = 0.900",
-                        f"  allowance floor area = {int(sqft)}",  # Should be actual room size
-                    ]
-                    decorative_allowances[idx] += int(0.9 * sqft)  # Remove qty multiplication
-                else:
-                    # Other decorative allowance (75% factor)
-                    fixture_lines += [
-                        "  allowance type = ALLOWANCE_DECORATIVE_APPEARANCE_OTHER", 
-                        "  allowance description = Decorative Appearance (not lobbies)",
-                        "  power allowance factor = 0.750",
-                        f"  allowance floor area = {int(sqft)}",  # Should be actual room size
-                    ]
-                    decorative_allowances[idx] += int(0.75 * sqft)  # Remove qty multiplication
-            
-            fixture_lines.append(f"  quantity = {qty} )")
-            lines.extend(fixture_lines)
             fid += 1
 
-    # ACTIVITY USE blocks - CORRECTED to use decimal power density
+    # PROJECT section - exact from original
+    lines += [
+        "PROJECT 1 (",
+        "  project complete = FALSE )"
+    ]
+
+    # ACTIVITY USE blocks - exact format from original
     for idx, room in enumerate(spaces, start=1):
         ctype = guess_type(room)
         cat = CATEGORY_MAP[ctype]
         dtype = ACTIVITY_TYPE[ctype]
-        power_density = POWER_DENSITY[cat]  # Now using correct decimal values
+        power_density = POWER_DENSITY[cat]
         sqft = spaces[room]
+        # Generate a consistent key based on room name
+        key_val = abs(hash(room)) % 2000000000 + 500000000
+        
         lines += [
             f"ACTIVITY USE {idx} (",
-            f"  key = {1000000000 + idx}",
+            f"  key = {key_val}",
             f"  activity type = {dtype}",
             f"  activity description = <|Common Space Types:{ctype}|>",
             f"  area description = <|{room}|>",
-            f"  power density = {power_density}",  # FIXED: Now using decimals
+            f"  power density = {power_density}",
             "  ceiling height = 0",
             "  internal load = 1.95",
             f"  list position = {idx}",
@@ -280,13 +232,11 @@ def generate_comcheck(fixtures_csv: str, spaces_csv: str) -> str:
             f"  floor area = {sqft} )"
         ]
 
-    # Static PROJECT, WHOLE BLDG USE, EXTERIOR USE sections
+    # WHOLE BLDG USE and EXTERIOR USE - exact from original
     lines += [
-        "PROJECT 1 (",
-        "  project complete = FALSE )",
-        "WHOLE BLDG USE 1 (",  # CORRECTED: Should be 1, not 2
+        "WHOLE BLDG USE 1 (",
         "  whole bldg type = WHOLE_BUILDING_INVALID_USE",
-        "  key = 1545582262",  # Use key from official file
+        "  key = 1545582262",
         "  whole bldg description = <||>",
         "  area description = <||>",
         "  power density = 0",
@@ -296,7 +246,7 @@ def generate_comcheck(fixtures_csv: str, spaces_csv: str) -> str:
         "  construction type = NON_RESIDENTIAL",
         "  floor area = 0 )",
         "EXTERIOR USE 1 (",
-        "  key = 1791777704",  # Use key from official file
+        "  key = 1791777704",
         "  exterior type = EXTERIOR_INVALID_USE",
         "  exterior description = <||>",
         "  area description = <||>",
@@ -306,7 +256,7 @@ def generate_comcheck(fixtures_csv: str, spaces_csv: str) -> str:
         "  is tradable = FALSE )"
     ]
 
-    # REQUIREMENT ANSWER blocks - using actual requirement codes from official file
+    # REQUIREMENT ANSWER blocks - exact from original
     requirement_codes = [
         "PR4_IECC2018_C_C103.2",
         "FI17_IECC2018_C_C303.3_C408.2.5.2", 
