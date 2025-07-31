@@ -24,10 +24,13 @@ CATEGORY_MAP = {
     'Copy/Print Room': 16,
     'Storage': 17,
     'Dining Area - General': 18,
-    'Electrical/Mechanical': 19
+    'Electrical/Mechanical': 19,
+    'Lobby - General': 20,  # Added based on official file
+    'Computer Room': 21,    # Added based on official file
+    'Storage >=50 - <=1000 sq.ft.': 22  # Added based on official file
 }
 
-# Power densities - EXACT from working analysis
+# Power densities - Updated with new space types
 POWER_DENSITY = {
     1: 0.82,   # Office - Open Plan
     2: 0.85,   # Office - Enclosed
@@ -47,7 +50,10 @@ POWER_DENSITY = {
     16: 0.74,  # Copy/Print Room
     17: 0.43,  # Storage
     18: 0.89,  # Dining Area - General
-    19: 0.95   # Electrical/Mechanical
+    19: 0.95,  # Electrical/Mechanical
+    20: 0.90,  # Lobby - General
+    21: 1.16,  # Computer Room
+    22: 0.43   # Storage >=50 - <=1000 sq.ft.
 }
 
 ACTIVITY_TYPE = {
@@ -69,34 +75,101 @@ ACTIVITY_TYPE = {
     'Copy/Print Room': 'ACTIVITY_COMMON_COPY_PRINT_ROOM',
     'Storage': 'ACTIVITY_COMMON_STORAGE',
     'Dining Area - General': 'ACTIVITY_COMMON_DINING_GENERAL',
-    'Electrical/Mechanical': 'ACTIVITY_COMMON_ELECTRICAL_MECHANICAL'
+    'Electrical/Mechanical': 'ACTIVITY_COMMON_ELECTRICAL_MECHANICAL',
+    'Lobby - General': 'ACTIVITY_COMMON_LOBBY',
+    'Computer Room': 'ACTIVITY_COMMON_COMPUTER_ROOM',
+    'Storage >=50 - <=1000 sq.ft.': 'ACTIVITY_COMMON_STORAGE_GT50_LT1000'
+}
+
+# Decorative fixture types and their allowances
+DECORATIVE_FIXTURES = {
+    # Fixtures that get decorative allowances in lobbies
+    'TU': 'ALLOWANCE_DECORATIVE_APPEARANCE_LOBBIES',
+    'TU-2': 'ALLOWANCE_DECORATIVE_APPEARANCE_LOBBIES',
+    'TU-3': 'ALLOWANCE_DECORATIVE_APPEARANCE_LOBBIES',
+    'TT': 'ALLOWANCE_DECORATIVE_APPEARANCE_LOBBIES',
+    
+    # Fixtures that get decorative allowances in other spaces
+    'FFE-2': 'ALLOWANCE_DECORATIVE_APPEARANCE_OTHER',
+    'FFE-4': 'ALLOWANCE_DECORATIVE_APPEARANCE_OTHER',
+    'FFE-5': 'ALLOWANCE_DECORATIVE_APPEARANCE_OTHER',
+    'TM-1': 'ALLOWANCE_DECORATIVE_APPEARANCE_OTHER',
+    'TN': 'ALLOWANCE_DECORATIVE_APPEARANCE_OTHER',
+    'TN-3': 'ALLOWANCE_DECORATIVE_APPEARANCE_OTHER',
+    'TH-1': 'ALLOWANCE_DECORATIVE_APPEARANCE_OTHER'
+}
+
+# Power allowance factors
+POWER_ALLOWANCE_FACTORS = {
+    'ALLOWANCE_DECORATIVE_APPEARANCE_LOBBIES': 0.900,
+    'ALLOWANCE_DECORATIVE_APPEARANCE_OTHER': 0.750
 }
 
 def guess_type(name: str) -> str:
     """Heuristic mapping from Room ID to space type."""
     n = name.upper()
-    if 'OPEN DESK' in n:
-        return 'Office - Open Plan'
-    if n.startswith('LARGE OFFICE') or n.startswith('OFFICE'):
-        return 'Office - Enclosed'
-    if '<50' in n:
-        return 'Storage <50 sq.ft.'
-    if n.startswith(('MEN', 'WOMEN')) or 'RR ' in n:
-        return 'Restrooms'
-    if 'CORRIDORS' in n:
-        return 'Corridor/Transition >=8 ft wide'
-    if any(k in n for k in ('PHONE', 'FLEX ROOM', 'MED MEETING')):
-        return 'Conference/Meeting/Multipurpose'
-    if any(k in n for k in ('PANTRY', 'PREP PANTRY')):
-        return 'Food Preparation'
-    if 'ELEVATOR LOBBY' in n:
+    
+    # Check for specific matches first
+    if 'LOBBY' in n and 'ELEVATOR' in n:
         return 'Lobby For Elevator'
+    elif any(x in n for x in ['ENTRANCE', 'PREFUNCTION', 'RECEPTION', 'BREAKOUT']) and 'LOBBY' in n:
+        return 'Lobby - General'
+    elif 'COMPUTER ROOM' in n or 'AV CLOSET' in n or 'ELEC ROOM' in n or 'MER ' in n:
+        return 'Computer Room'
+    elif 'STORAGE' in n and ('>=50' in n or '<=1000' in n):
+        return 'Storage >=50 - <=1000 sq.ft.'
+    elif 'STORAGE' in n or 'COAT CLOSET' in n or 'TRASH' in n:
+        return 'Storage >=50 - <=1000 sq.ft.'
+    elif 'OPEN DESK' in n:
+        return 'Office - Open Plan'
+    elif n.startswith('LARGE OFFICE') or n.startswith('OFFICE') or 'OFFICE' in n:
+        return 'Office - Enclosed'
+    elif '<50' in n:
+        return 'Storage <50 sq.ft.'
+    elif n.startswith(('MEN', 'WOMEN')) or 'RR ' in n or 'RESTROOM' in n:
+        return 'Restrooms'
+    elif 'CORRIDORS' in n:
+        return 'Corridor/Transition >=8 ft wide'
+    elif any(k in n for k in ('PHONE', 'FLEX ROOM', 'MED MEETING', 'CONFERENCE', 'INTERVIEW', 
+                              'BOARDROOM', 'TALENT ROOM', 'MPR')):
+        return 'Conference/Meeting/Multipurpose'
+    elif any(k in n for k in ('PANTRY', 'PREP PANTRY', 'FOOD PREP')):
+        return 'Food Preparation'
+    elif 'ELEVATOR LOBBY' in n or 'ELEVATOR' in n:
+        return 'Lobby For Elevator'
+    elif 'LOBBY' in n:
+        return 'Lobby - General'
     return 'Conference/Meeting/Multipurpose'
 
 def parse_wattage(raw: str) -> float:
     """Extract numeric wattage from a string, stripping 'W' or any non-digit."""
     cleaned = re.sub(r'[^\d.]', '', raw)
     return float(cleaned) if cleaned else 0.0
+
+def get_decorative_allowance_for_fixture(fixture_type: str, space_type: str) -> tuple:
+    """
+    Returns (allowance_type, allowance_description, power_factor) or (None, None, None)
+    """
+    if fixture_type not in DECORATIVE_FIXTURES:
+        return None, None, None
+    
+    allowance_type = DECORATIVE_FIXTURES[fixture_type]
+    
+    # Check if this allowance type is appropriate for the space
+    if allowance_type == 'ALLOWANCE_DECORATIVE_APPEARANCE_LOBBIES':
+        # Only apply to lobby spaces
+        if 'Lobby' in space_type:
+            return (allowance_type, 
+                   'Decorative Appearance in lobbbies',  # Note: typo is intentional to match official
+                   POWER_ALLOWANCE_FACTORS[allowance_type])
+    else:
+        # Apply to non-lobby spaces
+        if 'Lobby' not in space_type:
+            return (allowance_type,
+                   'Decorative Appearance (not lobbies)',
+                   POWER_ALLOWANCE_FACTORS[allowance_type])
+    
+    return None, None, None
 
 def generate_comcheck(fixtures_csv: str, spaces_csv: str) -> str:
     # Parse spaces.csv
@@ -151,12 +224,47 @@ def generate_comcheck(fixtures_csv: str, spaces_csv: str) -> str:
         "  exterior lighting zone type = EXT_ZONE_UNSPECIFIED )"
     ]
 
-    # INTERIOR SPACE blocks - just base calculation for now
+    # Track decorative allowances by space
+    space_decorative_allowances = {}
+    
+    # First pass: identify decorative fixtures and calculate allowances
     for idx, (room, sqft) in enumerate(spaces.items(), start=1):
         ctype = guess_type(room)
-        cat = CATEGORY_MAP[ctype]
-        power_density = POWER_DENSITY[cat]
+        room_fixtures = fixtures.get(room, {})
+        
+        # Calculate decorative allowances for this space
+        total_decorative_area = 0
+        for fix_type, qty in room_fixtures.items():
+            allowance_type, _, _ = get_decorative_allowance_for_fixture(fix_type, ctype)
+            if allowance_type:
+                # For decorative fixtures, the allowance area is the room area
+                total_decorative_area = sqft
+                break  # Only need one decorative fixture to apply allowance to whole space
+        
+        space_decorative_allowances[idx] = total_decorative_area
+
+    # INTERIOR SPACE blocks with allowance calculations
+    for idx, (room, sqft) in enumerate(spaces.items(), start=1):
+        ctype = guess_type(room)
+        cat = CATEGORY_MAP.get(ctype, 12)  # Default to conference if not found
+        power_density = POWER_DENSITY.get(cat, 0.93)
+        
+        # Calculate base allowed wattage
         base_allowed = int(power_density * sqft)
+        
+        # Add decorative allowance if applicable
+        decorative_area = space_decorative_allowances.get(idx, 0)
+        if decorative_area > 0:
+            # Check which type of decorative allowance applies
+            room_fixtures = fixtures.get(room, {})
+            for fix_type in room_fixtures:
+                allowance_type, _, power_factor = get_decorative_allowance_for_fixture(fix_type, ctype)
+                if allowance_type:
+                    # Add decorative allowance: area * power_density * (1 - power_factor)
+                    decorative_allowance = int(decorative_area * power_density * (1 - power_factor))
+                    base_allowed += decorative_allowance
+                    break
+        
         total_w = sum(q * watt_map[f] for f, q in fixtures.get(room, {}).items())
         
         lines += [
@@ -175,14 +283,22 @@ def generate_comcheck(fixtures_csv: str, spaces_csv: str) -> str:
             f"  activity category number = {cat} )"
         ]
 
-    # FIXTURE blocks - EXACTLY matching original structure
+    # FIXTURE blocks with decorative allowance attributes
     fid = 1
+    list_pos = 1
     for idx, room in enumerate(spaces, start=1):
+        room_type = guess_type(room)
+        room_sqft = spaces[room]
+        
         for fix, qty in fixtures.get(room, {}).items():
             w = int(watt_map.get(fix, 0))
+            
+            # Check if this fixture gets decorative allowance
+            allowance_type, allowance_desc, power_factor = get_decorative_allowance_for_fixture(fix, room_type)
+            
             lines += [
                 f"FIXTURE {fid} (",
-                f"  list position = {idx}",
+                f"  list position = {list_pos}",
                 "  fixture use type = FIXTURE_USE_INTERIOR",
                 "  power adjustment factor = 0.000",
                 "  paf desc = None",
@@ -196,23 +312,36 @@ def generate_comcheck(fixtures_csv: str, spaces_csv: str) -> str:
                 "  lamp type = Other",
                 "  ballast = UNSPECIFIED_BALLAST",
                 "  number of lamps = 1",
-                f"  fixture wattage = {w}",
-                f"  quantity = {qty} )"
+                f"  fixture wattage = {w}"
             ]
+            
+            # Add decorative allowance fields if applicable
+            if allowance_type:
+                lines += [
+                    f"  allowance type = {allowance_type}",
+                    f"  allowance description = {allowance_desc}",
+                    f"  power allowance factor = {power_factor:.3f}",
+                    f"  allowance floor area = {room_sqft}"
+                ]
+            
+            lines.append(f"  quantity = {qty} )")
+            
             fid += 1
+            list_pos += 1
 
     # PROJECT section - exact from original
     lines += [
         "PROJECT 1 (",
-        "  project complete = FALSE )"
+        "  project complete = FALSE",
+        "  )"
     ]
 
     # ACTIVITY USE blocks - exact format from original
     for idx, room in enumerate(spaces, start=1):
         ctype = guess_type(room)
-        cat = CATEGORY_MAP[ctype]
-        dtype = ACTIVITY_TYPE[ctype]
-        power_density = POWER_DENSITY[cat]
+        cat = CATEGORY_MAP.get(ctype, 12)
+        dtype = ACTIVITY_TYPE.get(ctype, 'ACTIVITY_COMMON_CONFERENCE_HALL')
+        power_density = POWER_DENSITY.get(cat, 0.93)
         sqft = spaces[room]
         # Generate a consistent key based on room name
         key_val = abs(hash(room)) % 2000000000 + 500000000
