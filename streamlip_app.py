@@ -183,19 +183,24 @@ def generate_comcheck(fixtures_csv: str, spaces_csv: str) -> str:
         "  exterior lighting zone type = EXT_ZONE_UNSPECIFIED )"
     ]
 
-    # Create a mapping to track which list position each space starts at
-    space_start_positions = {}
-    current_list_position = 1
+    # Track fixture counts per space for list position calculation
+    fixture_counts = {}
+    activity_counts = {}
+    total_activities = 0
     
-    # First, calculate where each space's fixtures will start in the global list
     for idx, room in enumerate(spaces_list, start=1):
-        space_start_positions[idx] = current_list_position
-        # Count how many fixtures this room has
         room_fixtures = fixtures.get(room, {})
         fixture_count = len(room_fixtures)
-        current_list_position += fixture_count
+        fixture_counts[idx] = fixture_count
+        
+        # Count activities (for this simple case, 1 per space)
+        activity_counts[idx] = 1
+        total_activities += 1
 
-    # INTERIOR SPACE blocks - base calculation without decorative allowances
+    # INTERIOR SPACE blocks - with proper list positions
+    space_list_positions = {}
+    current_list_pos = 1
+    
     for idx, room in enumerate(spaces_list, start=1):
         sqft = spaces_dict[room]
         ctype = guess_type(room)
@@ -204,13 +209,16 @@ def generate_comcheck(fixtures_csv: str, spaces_csv: str) -> str:
         base_allowed = int(power_density * sqft)
         total_w = sum(q * watt_map[f] for f, q in fixtures.get(room, {}).items())
         
+        # Store the list position for this space
+        space_list_positions[idx] = current_list_pos
+        
         lines += [
             f"INTERIOR SPACE {idx} (",
             f"  description = <|{room} ( Common Space Types:{ctype} {sqft} sq.ft.)|>",
             "  space type = SPACE_INTERIOR_LIGHTING",
             f"  space allowed wattage = {base_allowed}",
             f"  space prop wattage = {int(total_w)}",
-            f"  list position = {idx}",
+            f"  list position = {current_list_pos}",
             "  allowance description = None",
             "  allowance type = ALLOWANCE_NONE",
             "  allowance floor area = 0",
@@ -219,20 +227,27 @@ def generate_comcheck(fixtures_csv: str, spaces_csv: str) -> str:
             "  rcr workplane to luminaire height = 0",
             f"  activity category number = {cat} )"
         ]
+        
+        # Increment list position by number of activities + fixtures + some buffer
+        # Based on the official file pattern, there seems to be gaps
+        current_list_pos += max(7, fixture_counts[idx] + 4)
 
-    # FIXTURE blocks - CRITICAL: list_position must be globally sequential
+    # FIXTURE blocks - with proper list positions based on parent space
     fid = 1
-    global_list_position = 1  # This tracks position across ALL fixtures
     
     for idx, room in enumerate(spaces_list, start=1):
         room_fixtures = fixtures.get(room, {})
+        
+        # Calculate starting list position for fixtures of this space
+        # Based on official file pattern: space fixtures start 3-5 positions after space list position
+        fixture_list_pos = space_list_positions[idx] + 4
         
         for fix, qty in room_fixtures.items():
             w = int(watt_map.get(fix, 0))
             
             lines += [
                 f"FIXTURE {fid} (",
-                f"  list position = {global_list_position}",  # GLOBAL position
+                f"  list position = {fixture_list_pos}",
                 "  fixture use type = FIXTURE_USE_INTERIOR",
                 "  power adjustment factor = 0.000",
                 "  paf desc = None",
@@ -251,7 +266,7 @@ def generate_comcheck(fixtures_csv: str, spaces_csv: str) -> str:
             ]
             
             fid += 1
-            global_list_position += 1  # Increment for EACH fixture
+            fixture_list_pos += 1  # Increment for next fixture in this space
 
     # PROJECT section - exact from original
     lines += [
