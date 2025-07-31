@@ -27,27 +27,27 @@ CATEGORY_MAP = {
     'Electrical/Mechanical': 19
 }
 
-# CORRECTED: These should be decimal values (W/sq.ft, not W/sq.m * 100)
+# REVERTED: Back to original power densities for NYC IECC 2018
 POWER_DENSITY = {
-    1: 0.82,   # Office - Open Plan (was 16)
-    2: 0.85,   # Office - Enclosed (was 18) 
-    3: 0.43,   # Storage <50 sq.ft. (was 9)
-    4: 0.41,   # Corridor/Transition <8 ft wide (was 13)
-    5: 0.50,   # Corridor/Transition >=8 ft wide (was 14)
-    6: 0.75,   # Restrooms (was 19)
-    7: 0.89,   # Dining Area - Cafeteria/Fast Food (was 14)
-    8: 0.65,   # General Seating Area (was 10)
-    9: 0.52,   # Lobby For Elevator (was 15)
-    10: 0.92,  # Food Preparation (was 27)
-    11: 1.24,  # Classroom/Lecture/Training (was 22)
-    12: 0.93,  # Conference/Meeting/Multipurpose (was 29)
-    13: 0.49,  # Stairwell (was 16)
-    14: 0.75,  # Locker Room (was 15)
-    15: 0.72,  # Exercise Area (was 17)
-    16: 0.74,  # Copy/Print Room (was 18)
-    17: 0.43,  # Storage (was 15)
-    18: 0.89,  # Dining Area - General (was 20)
-    19: 0.95   # Electrical/Mechanical (was 15)
+    1: 0.82,   # Office - Open Plan  
+    2: 0.85,   # Office - Enclosed
+    3: 0.43,   # Storage <50 sq.ft.
+    4: 0.41,   # Corridor/Transition <8 ft wide
+    5: 0.50,   # Corridor/Transition >=8 ft wide
+    6: 0.75,   # Restrooms
+    7: 0.89,   # Dining Area - Cafeteria/Fast Food
+    8: 0.65,   # General Seating Area
+    9: 0.52,   # Lobby For Elevator
+    10: 0.92,  # Food Preparation
+    11: 1.24,  # Classroom/Lecture/Training
+    12: 0.93,  # Conference/Meeting/Multipurpose
+    13: 0.49,  # Stairwell
+    14: 0.75,  # Locker Room
+    15: 0.72,  # Exercise Area
+    16: 0.74,  # Copy/Print Room
+    17: 0.43,  # Storage
+    18: 0.89,  # Dining Area - General
+    19: 0.95   # Electrical/Mechanical
 }
 
 ACTIVITY_TYPE = {
@@ -99,13 +99,14 @@ def parse_wattage(raw: str) -> float:
     return float(cleaned) if cleaned else 0.0
 
 def generate_comcheck(fixtures_csv: str, spaces_csv: str) -> str:
-    # Parse spaces.csv
+    # Parse spaces.csv - ensure consistent formatting
     reader_s = csv.DictReader(StringIO(spaces_csv), skipinitialspace=True)
     sf_keys = [k for k in reader_s.fieldnames if k.replace(" ", "").lower() == "squarefootage"]
     if not sf_keys:
         raise ValueError(f"spaces.csv must have a 'SquareFootage' column; found {reader_s.fieldnames}")
     sf_key = sf_keys[0]
-    spaces = {row['Room ID']: float(row[sf_key]) for row in reader_s}
+    # Store as integers to match official file format exactly
+    spaces = {row['Room ID']: int(float(row[sf_key])) for row in reader_s}
 
     # Parse fixtures.csv
     reader_f = csv.DictReader(StringIO(fixtures_csv), skipinitialspace=True)
