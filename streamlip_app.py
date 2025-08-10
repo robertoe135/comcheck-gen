@@ -4,56 +4,89 @@ import re
 from io import StringIO
 from collections import defaultdict
 
-# --- Mapping tables - EXACT from original analysis ---
-CATEGORY_MAP = {
-    'Office - Open Plan': 1,
-    'Office - Enclosed': 2,
-    'Storage <50 sq.ft.': 3,
-    'Corridor/Transition <8 ft wide': 4,
-    'Corridor/Transition >=8 ft wide': 5,
-    'Restrooms': 6,
-    'Dining Area - Cafeteria/Fast Food': 7,
-    'General Seating Area': 8,
-    'Lobby For Elevator': 9,
-    'Food Preparation': 10,
-    'Classroom/Lecture/Training': 11,
-    'Conference/Meeting/Multipurpose': 12,
-    'Stairwell': 13,
-    'Locker Room': 14,
-    'Exercise Area (Gymnasium/Fitness Center)': 15,
-    'Copy/Print Room': 16,
-    'Storage': 17,
-    'Dining Area - General': 18,
-    'Electrical/Mechanical': 19,
-    'Lobby - General': 20,
-    'Computer Room': 21,
-    'Storage >=50 - <=1000 sq.ft.': 22
-}
+st.set_page_config(page_title="COMcheck CCK Builder (Refactored)", layout="wide")
 
-# Power densities - Updated with new space types
-POWER_DENSITY = {
-    1: 0.82,   # Office - Open Plan
-    2: 0.85,   # Office - Enclosed
-    3: 0.43,   # Storage <50 sq.ft.
-    4: 0.41,   # Corridor/Transition <8 ft wide
-    5: 0.50,   # Corridor/Transition >=8 ft wide
-    6: 0.75,   # Restrooms
-    7: 0.89,   # Dining Area - Cafeteria/Fast Food
-    8: 0.65,   # General Seating Area
-    9: 0.52,   # Lobby For Elevator
-    10: 0.92,  # Food Preparation
-    11: 1.24,  # Classroom/Lecture/Training
-    12: 0.93,  # Conference/Meeting/Multipurpose
-    13: 0.49,  # Stairwell
-    14: 0.75,  # Locker Room
-    15: 0.72,  # Exercise Area
-    16: 0.74,  # Copy/Print Room
-    17: 0.43,  # Storage
-    18: 0.89,  # Dining Area - General
-    19: 0.95,  # Electrical/Mechanical
-    20: 0.90,  # Lobby - General
-    21: 1.16,  # Computer Room
-    22: 0.43   # Storage >=50 - <=1000 sq.ft.
+# -------- Utilities --------
+def parse_cck_blocks(text, section):
+    pattern = re.compile(rf"{section}\s+(\d+)\s+\(", re.MULTILINE)
+    matches = list(pattern.finditer(text))
+    blocks = []
+    for i, m in enumerate(matches):
+        start = m.end()
+        end = matches[i+1].start() if i+1 < len(matches) else len(text)
+        content = text[start:end]
+        blocks.append((int(m.group(1)), content))
+    return blocks
+
+def kv_pairs(block_text):
+    out = {}
+    for line in block_text.splitlines():
+        if '=' in line:
+            k, v = line.split('=', 1)
+            out[k.strip()] = v.strip()
+    return out
+
+def extract_header_and_tail(txt):
+    # Keep everything before the first INTERIOR SPACE / ACTIVITY USE
+    # and everything after the last of those sections
+    first = None
+    last = 0
+    for m in re.finditer(r"(INTERIOR SPACE|ACTIVITY USE)\s+\d+\s+\(", txt):
+        if first is None:
+            first = m.start()
+        last = m.end()
+    if first is None:
+        return txt, "", ""
+    header = txt[:first]
+    tail = txt[last:]
+    return header, txt[first:last], tail
+
+# Approved space types
+SPACE_TYPES = [
+    'Office - Open Plan',
+    'Office - Enclosed',
+    'Storage <50 sq.ft.',
+    'Corridor/Transition <8 ft wide',
+    'Corridor/Transition >=8 ft wide',
+    'Restrooms',
+    'Dining Area - Cafeteria/Fast Food',
+    'General Seating Area',
+    'Lobby For Elevator',
+    'Food Preparation',
+    'Classroom/Lecture/Training',
+    'Conference/Meeting/Multipurpose',
+    'Stairwell',
+    'Locker Room',
+    'Exercise Area (Gymnasium/Fitness Center)',
+    'Copy/Print Room',
+    'Storage',
+    'Dining Area - General',
+    'Electrical/Mechanical'
+]
+
+CATEGORY_MAP = {name: i+1 for i, name in enumerate(SPACE_TYPES)}
+
+# Default LPDs in W/ft² (edit in UI)
+DEFAULT_LPD = {
+    'Office - Open Plan': 0.82,
+    'Office - Enclosed': 0.85,
+    'Storage <50 sq.ft.': 0.50,
+    'Corridor/Transition <8 ft wide': 0.66,
+    'Corridor/Transition >=8 ft wide': 0.66,
+    'Restrooms': 0.90,
+    'Dining Area - Cafeteria/Fast Food': 0.90,
+    'General Seating Area': 0.90,
+    'Lobby For Elevator': 0.90,
+    'Food Preparation': 1.20,
+    'Classroom/Lecture/Training': 0.90,
+    'Conference/Meeting/Multipurpose': 0.90,
+    'Stairwell': 0.60,
+    'Locker Room': 0.80,
+    'Exercise Area (Gymnasium/Fitness Center)': 0.90,
+    'Copy/Print Room': 0.75,
+    'Storage': 0.63,
+    'Dining Area - General': 0.90,
+    'Electrical/Mechanical': 0.80
 }
 
 ACTIVITY_TYPE = {
@@ -75,338 +108,261 @@ ACTIVITY_TYPE = {
     'Copy/Print Room': 'ACTIVITY_COMMON_COPY_PRINT_ROOM',
     'Storage': 'ACTIVITY_COMMON_STORAGE',
     'Dining Area - General': 'ACTIVITY_COMMON_DINING_GENERAL',
-    'Electrical/Mechanical': 'ACTIVITY_COMMON_ELECTRICAL_MECHANICAL',
-    'Lobby - General': 'ACTIVITY_COMMON_LOBBY',
-    'Computer Room': 'ACTIVITY_COMMON_COMPUTER_ROOM',
-    'Storage >=50 - <=1000 sq.ft.': 'ACTIVITY_COMMON_STORAGE_GT50_LT1000'
+    'Electrical/Mechanical': 'ACTIVITY_COMMON_ELECTRICAL_MECHANICAL'
 }
 
 def guess_type(name: str) -> str:
-    """Heuristic mapping from Room ID to space type."""
     n = name.upper()
-    
-    # Check for specific matches first
-    if 'LOBBY' in n and 'ELEVATOR' in n:
-        return 'Lobby For Elevator'
-    elif any(x in n for x in ['ENTRANCE', 'PREFUNCTION', 'RECEPTION', 'BREAKOUT']) or ('LOBBY' in n and 'ELEVATOR' not in n):
-        return 'Lobby - General'
-    elif 'COMPUTER ROOM' in n or 'AV CLOSET' in n or 'ELEC ROOM' in n or 'MER ' in n:
-        return 'Computer Room'
-    elif 'STORAGE' in n and ('>=50' in n or '<=1000' in n):
-        return 'Storage >=50 - <=1000 sq.ft.'
-    elif 'STORAGE' in n or 'COAT CLOSET' in n or 'TRASH' in n:
-        return 'Storage >=50 - <=1000 sq.ft.'
-    elif 'OPEN DESK' in n:
+    if 'OPEN DESK' in n:
         return 'Office - Open Plan'
-    elif n.startswith('LARGE OFFICE') or n.startswith('OFFICE') or 'OFFICE' in n:
+    if n.startswith('LARGE OFFICE') or n.startswith('OFFICE'):
         return 'Office - Enclosed'
-    elif '<50' in n:
+    if '<50' in n:
         return 'Storage <50 sq.ft.'
-    elif n.startswith(('MEN', 'WOMEN')) or 'RR ' in n or 'RESTROOM' in n:
+    if n.startswith(('MEN', 'WOMEN')) or 'RR ' in n:
         return 'Restrooms'
-    elif 'CORRIDORS' in n:
+    if 'CORRIDOR' in n:
         return 'Corridor/Transition >=8 ft wide'
-    elif any(k in n for k in ('PHONE', 'FLEX ROOM', 'MED MEETING', 'CONFERENCE', 'INTERVIEW', 
-                              'BOARDROOM', 'TALENT ROOM', 'MPR')):
-        return 'Conference/Meeting/Multipurpose'
-    elif any(k in n for k in ('PANTRY', 'PREP PANTRY', 'FOOD PREP')):
-        return 'Food Preparation'
-    elif 'ELEVATOR LOBBY' in n or 'ELEVATOR' in n:
-        return 'Lobby For Elevator'
-    elif 'LOBBY' in n:
-        return 'Lobby - General'
-    return 'Conference/Meeting/Multipurpose'
+    if 'PHONE' in n:
+        return 'Copy/Print Room'  # conservative default
+    return 'Office - Enclosed'
 
-def parse_wattage(raw: str) -> float:
-    """Extract numeric wattage from a string, stripping 'W' or any non-digit."""
-    cleaned = re.sub(r'[^\d.]', '', raw)
-    return float(cleaned) if cleaned else 0.0
+def build_sections(spaces, fixtures, watt_map, lpd_map):
+    lines = []
 
-def generate_comcheck(fixtures_csv: str, spaces_csv: str) -> str:
-    # Parse spaces.csv
-    reader_s = csv.DictReader(StringIO(spaces_csv), skipinitialspace=True)
-    sf_keys = [k for k in reader_s.fieldnames if k.replace(" ", "").lower() == "squarefootage"]
-    if not sf_keys:
-        raise ValueError(f"spaces.csv must have a 'SquareFootage' column; found {reader_s.fieldnames}")
-    sf_key = sf_keys[0]
-    
-    # Maintain order of spaces as they appear in CSV
-    spaces_list = []
-    spaces_dict = {}
-    for row in reader_s:
-        room_id = row['Room ID']
-        sqft = int(float(row[sf_key]))
-        spaces_list.append(room_id)
-        spaces_dict[room_id] = sqft
-
-    # Parse fixtures.csv
-    reader_f = csv.DictReader(StringIO(fixtures_csv), skipinitialspace=True)
-    fixtures = defaultdict(lambda: defaultdict(int))
-    watt_map = {}
-    for row in reader_f:
-        room = row['Room ID']
-        fix  = row['Fixture Description']
-        qty  = int(float(row['Quantity']))
-        w    = parse_wattage(row['Wattage'])
-        fixtures[room][fix] += qty
-        watt_map[fix] = w
-
-    # Build EXACT header from original file
-    lines = [
-        "WARNING: Do Not Modify This File!",
-        "Check 24.1.6 Data File",
-        "CONTROL 1 (",
-        "  code = CEZ_NYSTRETCH_NYC_IECC2018",
-        "  compliance mode = UA",
-        "  version = 24.1.6 )",
-        "LOCATION 1 (",
-        "  state = New York",
-        "  city = New York )",
-        "BUILDING 1 (",
-        "  project type = NEW_CONSTRUCTION",
-        "  bldg use type = ACTIVITY",
-        "  feet bldg height = 0.000",
-        "  number of stories = 1",
-        "  is nonresidential conditioning = TRUE",
-        "  is residential conditioning = FALSE",
-        "  is semiheated conditioning = FALSE",
-        "  conditioning = HEATING_AND_COOLING)",
-        "ENVELOPE 1 (",
-        "  use orient details = TRUE",
-        "  use vlt details = FALSE",
-        "  use cool roof performance details = FALSE",
-        "  air barrier compliance type = AIR_BARRIER_OPTION_UNKNOWN",
-        "  apply window pct allowance for daylighting = FALSE",
-        "  apply skylight pct allowance for daylighting = FALSE )",
-        "LIGHTING 1 (",
-        "  exterior lighting zone = 4 ",
-        "  exterior lighting zone type = EXT_ZONE_UNSPECIFIED )"
-    ]
-
-    # Track fixture counts per space for list position calculation
-    fixture_counts = {}
-    activity_counts = {}
-    total_activities = 0
-    
-    for idx, room in enumerate(spaces_list, start=1):
-        room_fixtures = fixtures.get(room, {})
-        fixture_count = len(room_fixtures)
-        fixture_counts[idx] = fixture_count
-        
-        # Count activities (for this simple case, 1 per space)
-        activity_counts[idx] = 1
-        total_activities += 1
-
-    # INTERIOR SPACE blocks - with proper list positions
-    space_list_positions = {}
-    current_list_pos = 1
-    
-    for idx, room in enumerate(spaces_list, start=1):
-        sqft = spaces_dict[room]
+    # INTERIOR SPACE blocks
+    for idx, (room, sqft) in enumerate(spaces.items(), start=1):
         ctype = guess_type(room)
-        cat = CATEGORY_MAP.get(ctype, 12)  # Default to conference if not found
-        power_density = POWER_DENSITY.get(cat, 0.93)
-        base_allowed = int(power_density * sqft)
-        total_w = sum(q * watt_map[f] for f, q in fixtures.get(room, {}).items())
-        
-        # Store the list position for this space
-        space_list_positions[idx] = current_list_pos
-        
+        cat = CATEGORY_MAP[ctype]
+        pd = float(lpd_map.get(ctype, DEFAULT_LPD[ctype]))
+        total_w = sum(q * float(watt_map.get(f, 0)) for f, q in fixtures.get(room, {}).items())
+        allowed_watts = int(round(float(sqft) * pd))
+
         lines += [
             f"INTERIOR SPACE {idx} (",
             f"  description = <|{room} ( Common Space Types:{ctype} {sqft} sq.ft.)|>",
             "  space type = SPACE_INTERIOR_LIGHTING",
-            f"  space allowed wattage = {base_allowed}",
-            f"  space prop wattage = {int(total_w)}",
-            f"  list position = {current_list_pos}",
+            f"  space allowed wattage = {allowed_watts}",
+            f"  space prop wattage = {int(round(total_w))}",
+            f"  list position = {idx}",
             "  allowance description = None",
             "  allowance type = ALLOWANCE_NONE",
             "  allowance floor area = 0",
             "  rcr perimeter = 0",
             "  rcr floor to workplane height = 0",
             "  rcr workplane to luminaire height = 0",
-            f"  activity category number = {cat} )"
+            f"  activity category number = {cat}",
+            ")"
         ]
-        
-        # Increment list position by number of activities + fixtures + some buffer
-        # Based on the official file pattern, there seems to be gaps
-        current_list_pos += max(7, fixture_counts[idx] + 4)
 
-    # FIXTURE blocks - with proper list positions based on parent space
-    fid = 1
-    
-    for idx, room in enumerate(spaces_list, start=1):
-        room_fixtures = fixtures.get(room, {})
-        
-        # Calculate starting list position for fixtures of this space
-        # Based on official file pattern: space fixtures start 3-5 positions after space list position
-        fixture_list_pos = space_list_positions[idx] + 4
-        
-        for fix, qty in room_fixtures.items():
-            w = int(watt_map.get(fix, 0))
-            
+    # FIXTURE blocks (aggregated per space)
+    fid = len(spaces) + 1
+    for idx, room in enumerate(spaces, start=1):
+        for fix, qty in fixtures.get(room, {}).items():
+            w = int(round(float(watt_map.get(fix, 0))))
             lines += [
                 f"FIXTURE {fid} (",
-                f"  list position = {fixture_list_pos}",
-                "  fixture use type = FIXTURE_USE_INTERIOR",
-                "  power adjustment factor = 0.000",
-                "  paf desc = None",
-                "  lamp wattage = 0.00",
-                "  lighting type = LED",
-                f"  type of fixture = <|{fix}|>",
-                "  description = <||>",
-                f"  fixture type = <|{fix}|>",
-                f"  parent number = {idx}",  # Links to INTERIOR SPACE number
-                "  lamp ballast description = <||>",
-                "  lamp type = Other",
-                "  ballast = UNSPECIFIED_BALLAST",
-                "  number of lamps = 1",
-                f"  fixture wattage = {w}",
-                f"  quantity = {qty} )"
+                f"  list position = {idx}",
+                f"  luminaire type id = <|{fix}|>",
+                f"  quantity = {int(qty)}",
+                f"  watt input = {w}",
+                ")"
             ]
-            
             fid += 1
-            fixture_list_pos += 1  # Increment for next fixture in this space
 
-    # PROJECT section - exact from original
-    lines += [
-        "PROJECT 1 (",
-        "  project complete = FALSE",
-        "  )"
-    ]
-
-    # ACTIVITY USE blocks - exact format from original
-    for idx, room in enumerate(spaces_list, start=1):
+    # ACTIVITY USE blocks
+    for idx, room in enumerate(spaces, start=1):
         ctype = guess_type(room)
-        cat = CATEGORY_MAP.get(ctype, 12)
-        dtype = ACTIVITY_TYPE.get(ctype, 'ACTIVITY_COMMON_CONFERENCE_HALL')
-        power_density = POWER_DENSITY.get(cat, 0.93)
-        sqft = spaces_dict[room]
-        # Generate a consistent key based on room name
-        key_val = abs(hash(room)) % 2000000000 + 500000000
-        
+        cat = CATEGORY_MAP[ctype]
+        dtype = ACTIVITY_TYPE[ctype]
+        pd = float(lpd_map.get(ctype, DEFAULT_LPD[ctype]))
+        sqft = float(spaces[room])
         lines += [
             f"ACTIVITY USE {idx} (",
-            f"  key = {key_val}",
+            f"  key = {1000000000 + idx}",
             f"  activity type = {dtype}",
             f"  activity description = <|Common Space Types:{ctype}|>",
             f"  area description = <|{room}|>",
-            f"  power density = {power_density}",
-            "  ceiling height = 0",
+            f"  power density = {pd}",
             "  internal load = 1.95",
+            "  ceiling height = 0",
             f"  list position = {idx}",
-            "  area factor = 1",
             "  construction type = NON_RESIDENTIAL",
-            f"  floor area = {sqft} )"
+            f"  floor area = {int(round(sqft))}",
+            ")"
         ]
+    return lines
 
-    # WHOLE BLDG USE and EXTERIOR USE - exact from original
-    lines += [
-        "WHOLE BLDG USE 1 (",
-        "  whole bldg type = WHOLE_BUILDING_INVALID_USE",
-        "  key = 1545582262",
-        "  whole bldg description = <||>",
-        "  area description = <||>",
-        "  power density = 0",
-        "  internal load = 0",
-        "  ceiling height = 0",
-        "  list position = 1",
-        "  construction type = NON_RESIDENTIAL",
-        "  floor area = 0 )",
-        "EXTERIOR USE 1 (",
-        "  key = 1791777704",
-        "  exterior type = EXTERIOR_INVALID_USE",
-        "  exterior description = <||>",
-        "  area description = <||>",
-        "  power density = 0",
-        "  use quantity = 0",
-        "  quantity units = <||>",
-        "  is tradable = FALSE )"
-    ]
+def normalize_act_list_positions(cck_text):
+    # Ensure ACTIVITY USE list positions == their index
+    blocks = list(re.finditer(r"(ACTIVITY USE\s+(\d+)\s+\()(.+?)(?=(?:\n[A-Z ]+\s+\d+\s+\()|$)", cck_text, flags=re.DOTALL))
+    chunks = []
+    last_end = 0
+    for m in blocks:
+        chunks.append(cck_text[last_end:m.start()])
+        idx = int(m.group(2))
+        body = m.group(3)
+        body_fixed = re.sub(r"(?:^|\n)\s*list position\s*=\s*\d+", "\n  list position = {}".format(idx), body, count=1)
+        chunks.append("ACTIVITY USE {} (".format(idx) + body_fixed)
+        last_end = m.end()
+    chunks.append(cck_text[last_end:])
+    return "".join(chunks)
 
-    # REQUIREMENT ANSWER blocks - exact from original
-    requirement_codes = [
-        "PR4_IECC2018_C_C103.2",
-        "FI17_IECC2018_C_C303.3_C408.2.5.2", 
-        "EL18_NYSTRETCH_NYC_IECC2018_C_C405.2.1_C405.2.1.1",
-        "EL19_IECC2018_C_C405.2.1.2",
-        "EL20_IECC2018_C_C405.2.1.3",
-        "EL21_IECC2018_C_C405.2.2_C405.2.2.1_C405.2.2.2",
-        "EL22_IECC2018_C_C405.2.2.2",
-        "EL23_NYSTRETCH_IECC2018_C_C405.2.3_C405.2.3.1_C405.2.3.2",
-        "EL26_IECC2018_C_C405.2.4",
-        "EL27_IECC2018_C_C405.2.4",
-        "EL6_NYSTRETCH_NYC_IECC2018_C_C405.1.1",
-        "FI18_IECC2018_C_C405.3.1",
-        "FI33_IECC2018_C_C408.3"
-    ]
-    
-    for n in range(1, len(requirement_codes) + 1):
-        lines += [
-            f"REQUIREMENT ANSWER {n} (",
-            f"  requirement = <|{requirement_codes[n-1]}|>",
-            "  category = INTERIOR LIGHTING",
-            "  exception name = <||>",
-            "  location on plans = <||>",
-            "  status = NOT_SATISFIED )"
-        ]
+def validator(cck_text):
+    # Check duplicates and area matches
+    errors = []
 
-    return "\n".join(lines)
+    def extract_blocks(text, section):
+        pattern = re.compile(rf"{section}\s+(\d+)\s+\(", re.MULTILINE)
+        matches = list(pattern.finditer(text))
+        blocks = []
+        for i, m in enumerate(matches):
+            start = m.end()
+            end = matches[i+1].start() if i+1 < len(matches) else len(text)
+            content = text[start:end]
+            blocks.append((int(m.group(1)), content))
+        return blocks
 
-# --- Streamlit UI ---
-st.set_page_config(page_title="TDA COMcheck Generator")
-logo_url = (
-    "https://images.squarespace-cdn.com/"
-    "content/v1/651344c15e9ed913545fbbf6/"
-    "46e7dba5-6680-4ab9-9745-a0dc87f26000/"
-    "TDA+LOGO%2C+JPEG.jpg?format=1500w"
-)
-st.image(logo_url, width=300)
-st.title("TDA COMcheck Generator")
+    def kvs(block_text):
+        out = {}
+        for line in block_text.splitlines():
+            if '=' in line:
+                k, v = line.split('=', 1)
+                out[k.strip()] = v.strip()
+        return out
 
-# Sample CSV templates
-SAMPLE_FIXTURES = """Room ID,Fixture Description,Quantity,Wattage
-OPEN DESK AREA - 17A01,TB-4,2,6 W
-"""
-SAMPLE_SPACES = """Room ID,SquareFootage
-OPEN DESK AREA - 17A01,20
-"""
+    spaces = extract_blocks(cck_text, "INTERIOR SPACE")
+    acts = extract_blocks(cck_text, "ACTIVITY USE")
 
-st.markdown("#### Download sample CSV templates to get started. This only works with NYC IECC 2020 at this time.")
-c1, c2 = st.columns(2)
-with c1:
-    st.download_button(
-        "Sample fixtures.csv",
-        data=SAMPLE_FIXTURES,
-        file_name="fixtures_template.csv",
-        mime="text/csv"
-    )
-with c2:
-    st.download_button(
-        "Sample spaces.csv",
-        data=SAMPLE_SPACES,
-        file_name="spaces_template.csv",
-        mime="text/csv"
-    )
+    # List position uniqueness
+    sp_pos = []
+    ac_pos = []
+    for i, b in spaces:
+        kv = kvs(b)
+        sp_pos.append(int(kv.get("list position", "0")))
+    for i, b in acts:
+        kv = kvs(b)
+        ac_pos.append(int(kv.get("list position", "0")))
+    if len(sp_pos) != len(set(sp_pos)):
+        errors.append("Duplicate INTERIOR SPACE list positions detected.")
+    if len(ac_pos) != len(set(ac_pos)):
+        errors.append("Duplicate ACTIVITY USE list positions detected.")
 
-# User inputs
-output_filename = st.text_input("Output filename:", "TDA_Generated ComCheck File.cck")
-f_uploaded = st.file_uploader("Upload fixtures.csv", type="csv")
-s_uploaded = st.file_uploader("Upload spaces.csv", type="csv")
+    # Area matching by position (desc sq.ft. vs ACTIVITY USE floor area)
+    def desc_area(desc):
+        m = re.search(r"(\d+(?:\.\d+)?)\s*sq\.ft\.\)\|>", desc or "")
+        return float(m.group(1)) if m else None
 
-# Generate and download
+    sp_map = {}
+    for i, b in spaces:
+        kv = kvs(b)
+        pos = int(kv.get("list position", "0"))
+        sp_map[pos] = desc_area(kv.get("description", ""))
+
+    for i, b in acts:
+        kv = kvs(b)
+        pos = int(kv.get("list position", "0"))
+        fa = kv.get("floor area", "0").split()[0]
+        try:
+            fa = float(fa)
+        except:
+            fa = None
+        if pos in sp_map and sp_map[pos] is not None and fa is not None and sp_map[pos] != fa:
+            errors.append(f"Area mismatch at position {pos}: INTERIOR={sp_map[pos]} vs ACTIVITY={fa}")
+
+    return errors
+
+# -------- UI --------
+st.title("Refactored COMcheck Generator (Fixes Allowances & List Positions)")
+
+with st.sidebar:
+    st.header("Inputs")
+    f_uploaded = st.file_uploader("Fixtures CSV (room,fixture,quantity,watt)", type=["csv"])
+    s_uploaded = st.file_uploader("Spaces CSV (room,floor_area)", type=["csv"])
+    official_cck = st.file_uploader("Optional: Official reference CCK (to clone header/tail)", type=["cck","txt"])
+
+    st.markdown("---")
+    st.subheader("LPD overrides (W/ft²)")
+    lpd_map = {}
+    for name in SPACE_TYPES:
+        lpd_map[name] = st.number_input(f"{name}", value=float(DEFAULT_LPD[name]), step=0.01, format="%.2f")
+
+    output_filename = st.text_input("Output filename", value="Generated_ComCheck_refactored.cck")
+
+def load_spaces(csv_text):
+    reader = csv.DictReader(StringIO(csv_text))
+    spaces = {}
+    for row in reader:
+        room = row.get("room") or row.get("Room") or row.get("area_description") or row.get("Area")
+        area = row.get("floor_area") or row.get("sqft") or row.get("Floor Area")
+        if not room or not area:
+            continue
+        try:
+            spaces[room.strip()] = float(area)
+        except:
+            pass
+    return spaces
+
+def load_fixtures(csv_text):
+    reader = csv.DictReader(StringIO(csv_text))
+    fixtures = defaultdict(lambda: defaultdict(int))
+    watt_map = {}
+    for row in reader:
+        room = (row.get("room") or row.get("Room") or "").strip()
+        fix = (row.get("fixture") or row.get("Fixture") or "").strip()
+        qty = row.get("quantity") or row.get("qty") or "0"
+        watt = row.get("watt") or row.get("watts") or row.get("W") or "0"
+        if room and fix:
+            try:
+                fixtures[room][fix] += int(float(qty))
+                watt_map[fix] = float(watt)
+            except:
+                continue
+    return fixtures, watt_map
+
+def generate_from_inputs(spaces, fixtures, watt_map, lpd_map, header_text=None, tail_text=None):
+    # Ensure stable order
+    spaces = dict(sorted(spaces.items(), key=lambda x: x[0]))
+    lines = []
+
+    # Header
+    if header_text:
+        lines.append(header_text.rstrip("\n"))
+
+    # Sections
+    section_lines = build_sections(spaces, fixtures, watt_map, lpd_map)
+    lines.extend(section_lines)
+
+    # Tail
+    if tail_text:
+        lines.append(tail_text.lstrip("\n"))
+
+    out = "\n".join(lines)
+    out = normalize_act_list_positions(out)
+    return out
+
+if 'f_uploaded' not in globals():
+    f_uploaded = None
+if 's_uploaded' not in globals():
+    s_uploaded = None
+
 if f_uploaded and s_uploaded:
     try:
-        comcheck_text = generate_comcheck(
-            f_uploaded.getvalue().decode("utf-8-sig"),
-            s_uploaded.getvalue().decode("utf-8-sig")
-        )
-        st.download_button(
-            "Download COMcheck file",
-            data=comcheck_text,
-            file_name=output_filename,
-            mime="text/plain"
-        )
-        st.success("✅ ComCheck file generated successfully!")
+        spaces = load_spaces(s_uploaded.getvalue().decode("utf-8-sig"))
+        fixtures, watt_map = load_fixtures(f_uploaded.getvalue().decode("utf-8-sig"))
+
+        header_txt = tail_txt = None
+        if official_cck:
+            base_txt = official_cck.getvalue().decode("utf-8", errors="ignore")
+            header_txt, _mid, tail_txt = extract_header_and_tail(base_txt)
+
+        cck_text = generate_from_inputs(spaces, fixtures, watt_map, lpd_map, header_txt, tail_txt)
+        errs = validator(cck_text)
+        if errs:
+            st.error("Validation issues:\n- " + "\n- ".join(errs))
+        st.download_button("Download COMcheck file", data=cck_text, file_name=output_filename, mime="text/plain")
+        st.code(cck_text[:2000])
     except Exception as e:
-        st.error(f"Error generating COMcheck: {e}")
+        st.error(f"Error: {e}")
+else:
+    st.info("Upload your Fixtures CSV and Spaces CSV to generate a COMcheck .cck file. Optionally add an Official CCK to clone headers/trailers.")
