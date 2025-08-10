@@ -1,320 +1,289 @@
-
+import io
+import pandas as pd
 import streamlit as st
-import csv
-from io import StringIO
-from collections import defaultdict
-import re
+from xml.etree.ElementTree import Element, SubElement, tostring
+from xml.dom import minidom
 
-st.set_page_config(page_title="COMcheck CCK – Simple Builder", layout="centered")
-st.title("COMcheck CCK — Simple Builder")
+# -----------------------
+# Constants & dictionaries
+# -----------------------
+NS = "http://energycode.pnl.gov/ns/ComCheckBuildingSchema"
 
-st.markdown("""
-**Inputs:**  
-1) `spaces.csv` — columns: `room,floor_area`  
-2) `fixtures.csv` — columns: `room,fixture,quantity,watt`  
-3) Output file name (e.g., `MyProject.cck`)
-
-The app infers **space type** from each room name (same logic as before) and calculates
-**allowed wattage = floor_area × LPD** using default LPDs. It also guarantees that
-`list position` values are unique and aligned, which fixes allowance area mismatches.
-""")
-
-# ---------------- Defaults ----------------
-SPACE_TYPES = [
-    'Office - Open Plan',
-    'Office - Enclosed',
-    'Storage <50 sq.ft.',
-    'Corridor/Transition <8 ft wide',
-    'Corridor/Transition >=8 ft wide',
-    'Restrooms',
-    'Dining Area - Cafeteria/Fast Food',
-    'General Seating Area',
-    'Lobby For Elevator',
-    'Food Preparation',
-    'Classroom/Lecture/Training',
-    'Conference/Meeting/Multipurpose',
-    'Stairwell',
-    'Locker Room',
-    'Exercise Area (Gymnasium/Fitness Center)',
-    'Copy/Print Room',
-    'Storage',
-    'Dining Area - General',
-    'Electrical/Mechanical'
+# Codes supported by COMcheck-Web (per EnergyCodes.gov, July 1, 2025)
+# Ref: https://www.energycodes.gov (COMcheck supported codes page)
+COMCHECK_CODES = [
+    # National model codes
+    "IECC 2015",
+    "IECC 2018",
+    "IECC 2021",
+    "IECC 2024",
+    "ASHRAE 90.1-2013",
+    "ASHRAE 90.1-2016",
+    "ASHRAE 90.1-2019",
+    "ASHRAE 90.1-2022",
+    # State/City variants implemented in COMcheck
+    "Boulder, CO",
+    "Denver, CO",
+    "Massachusetts Commercial Energy Code",
+    "Minnesota Commercial Energy Code",
+    "NYC Energy Conservation Code (NYCECC)",
+    "NYStretch-2020",
+    "Vermont 2020",
+    "Ontario 2017",
+    "Puerto Rico 2011",
 ]
-CATEGORY_MAP = {name: i+1 for i, name in enumerate(SPACE_TYPES)}
-DEFAULT_LPD = {
-    'Office - Open Plan': 0.82,
-    'Office - Enclosed': 0.85,
-    'Storage <50 sq.ft.': 0.50,
-    'Corridor/Transition <8 ft wide': 0.66,
-    'Corridor/Transition >=8 ft wide': 0.66,
-    'Restrooms': 0.90,
-    'Dining Area - Cafeteria/Fast Food': 0.90,
-    'General Seating Area': 0.90,
-    'Lobby For Elevator': 0.90,
-    'Food Preparation': 1.20,
-    'Classroom/Lecture/Training': 0.90,
-    'Conference/Meeting/Multipurpose': 0.90,
-    'Stairwell': 0.60,
-    'Locker Room': 0.80,
-    'Exercise Area (Gymnasium/Fitness Center)': 0.90,
-    'Copy/Print Room': 0.75,
-    'Storage': 0.63,
-    'Dining Area - General': 0.90,
-    'Electrical/Mechanical': 0.80
-}
-ACTIVITY_TYPE = {
-    'Office - Open Plan': 'ACTIVITY_COMMON_OFFICE_OPEN',
-    'Office - Enclosed': 'ACTIVITY_COMMON_OFFICE_ENCLOSED',
-    'Storage <50 sq.ft.': 'ACTIVITY_COMMON_STORAGE_LT50',
-    'Corridor/Transition <8 ft wide': 'ACTIVITY_COMMON_CORRIDOR_LT_8_FEET',
-    'Corridor/Transition >=8 ft wide': 'ACTIVITY_COMMON_CORRIDOR_GTE_8_FEET',
-    'Restrooms': 'ACTIVITY_COMMON_RESTROOM',
-    'Dining Area - Cafeteria/Fast Food': 'ACTIVITY_COMMON_DINING_CAFETERIA_FAST_FOOD',
-    'General Seating Area': 'ACTIVITY_COMMON_GENERAL_SEATING_AREA',
-    'Lobby For Elevator': 'ACTIVITY_COMMON_LOBBY_ELEVATOR',
-    'Food Preparation': 'ACTIVITY_COMMON_FOOD_PREP',
-    'Classroom/Lecture/Training': 'ACTIVITY_COMMON_LECTURE_HALL',
-    'Conference/Meeting/Multipurpose': 'ACTIVITY_COMMON_CONFERENCE_HALL',
-    'Stairwell': 'ACTIVITY_COMMON_STAIRS',
-    'Locker Room': 'ACTIVITY_COMMON_LOCKER_ROOM',
-    'Exercise Area (Gymnasium/Fitness Center)': 'ACTIVITY_GYM_EXERCISE',
-    'Copy/Print Room': 'ACTIVITY_COMMON_COPY_PRINT_ROOM',
-    'Storage': 'ACTIVITY_COMMON_STORAGE',
-    'Dining Area - General': 'ACTIVITY_COMMON_DINING_GENERAL',
-    'Electrical/Mechanical': 'ACTIVITY_COMMON_ELECTRICAL_MECHANICAL'
+
+# Map UI labels to ComCheck "control/code" strings used in .cxl
+CODE_TO_CONTROL = {
+    "IECC 2015": "CEZ_IECC2015",
+    "IECC 2018": "CEZ_IECC2018",
+    "IECC 2021": "CEZ_IECC2021",
+    "IECC 2024": "CEZ_IECC2024",
+    "ASHRAE 90.1-2013": "CEZ_ASHRAE90_1_2013",
+    "ASHRAE 90.1-2016": "CEZ_ASHRAE90_1_2016",
+    "ASHRAE 90.1-2019": "CEZ_ASHRAE90_1_2019",
+    "ASHRAE 90.1-2022": "CEZ_ASHRAE90_1_2022",
+    "Boulder, CO": "CEZ_LOCAL_BOULDER",
+    "Denver, CO": "CEZ_LOCAL_DENVER",
+    "Massachusetts Commercial Energy Code": "CEZ_LOCAL_MASSACHUSETTS",
+    "Minnesota Commercial Energy Code": "CEZ_LOCAL_MINNESOTA",
+    "NYC Energy Conservation Code (NYCECC)": "CEZ_LOCAL_NYCECC",
+    "NYStretch-2020": "CEZ_LOCAL_NYSTRETCH_2020",
+    "Vermont 2020": "CEZ_LOCAL_VERMONT_2020",
+    "Ontario 2017": "CEZ_LOCAL_ONTARIO_2017",
+    "Puerto Rico 2011": "CEZ_LOCAL_PUERTO_RICO_2011",
 }
 
-GENERIC_HEADER = """WARNING: Do Not Modify This File!
-Check 24.1.6 Data File
-CONTROL 1 (
-  code = CEZ_NYSTRETCH_NYC_IECC2018
-  compliance mode = UA
-  version = 24.1.6 )
-LOCATION 1 (
-  state = New York
-  city = New York )
-BUILDING 1 (
-  project type = NEW_CONSTRUCTION
-  bldg use type = ACTIVITY
-  feet bldg height = 0.000
-  number of stories = 1
-  is nonresidential conditioning = TRUE
-  is residential conditioning = FALSE
-  is semiheated conditioning = FALSE
-  conditioning = HEATING_AND_COOLING)
-ENVELOPE 1 (
-  use orient details = TRUE
-  use vlt details = FALSE
-  use cool roof performance details = FALSE
-  air barrier compliance type = AIR_BARRIER_OPTION_UNKNOWN
-  apply window pct allowance for daylighting = FALSE
-  apply skylight pct allowance for daylighting = FALSE )
-LIGHTING 1 (
-  exterior lighting zone = 0 
-  exterior lighting zone type = EXT_ZONE_UNSPECIFIED )
-"""
+# ComCheck wants “UA” or “PERFORMANCE” complianceMode; we’ll use UA for lighting/space-by-space
+DEFAULT_COMPLIANCE_MODE = "UA"
 
-GENERIC_TAIL = """
-WHOLE BUILDING 1 (
-  key = 587260110
-  whole bldg description = <||>
-  area description = <||>
-  power density = 0
-  internal load = 0
-  ceiling height = 0
-  list position = 1
-  construction type = NON_RESIDENTIAL
-  floor area = 0
-)
-EXTERIOR USE 1 (
-  key = 1417866914
-  exterior type = EXTERIOR_INVALID_USE
-  exterior description = <||>
-  area description = <||>
-  power density = 0
-  internal load = 0
-  list position = 0
-  construction type = NON_RESIDENTIAL
-  floor area = 0
-)
-"""
+# -----------------------
+# Helper functions
+# -----------------------
+def E(tag, text=None, parent=None):
+    """Create a namespaced element"""
+    el = Element(f"{{{NS}}}{tag}") if parent is None else SubElement(parent, f"{{{NS}}}{tag}")
+    if text is not None:
+        el.text = str(text)
+    return el
 
-# ---------------- Inference ----------------
-def guess_type(name: str) -> str:
-    n = (name or "").upper()
-    # Order matters: match more specific labels first
-    if 'OPEN DESK' in n or 'OPEN OFFICE' in n:
-        return 'Office - Open Plan'
-    if n.startswith('LARGE OFFICE') or n.startswith('OFFICE') or 'PRIVATE OFFICE' in n:
-        return 'Office - Enclosed'
-    if '<50' in n or 'STORAGE <50' in n:
-        return 'Storage <50 sq.ft.'
-    if any(k in n for k in ['MEN', 'WOMEN', 'RESTROOM', 'RR ']):
-        return 'Restrooms'
-    if 'LOBBY' in n or 'RECEPTION' in n:
-        return 'Lobby For Elevator'
-    if 'CAFETERIA' in n or 'DINING' in n:
-        return 'Dining Area - General'
-    if 'FOOD PREP' in n or 'KITCHEN' in n:
-        return 'Food Preparation'
-    if 'CLASSROOM' in n or 'LECTURE' in n or 'TRAINING' in n:
-        return 'Classroom/Lecture/Training'
-    if 'CONFERENCE' in n or 'MEETING' in n or 'MPR' in n:
-        return 'Conference/Meeting/Multipurpose'
-    if 'STAIR' in n:
-        return 'Stairwell'
-    if 'LOCKER' in n:
-        return 'Locker Room'
-    if 'GYM' in n or 'FITNESS' in n or 'EXERCISE' in n:
-        return 'Exercise Area (Gymnasium/Fitness Center)'
-    if 'COPY' in n or 'PRINT' in n or 'PHONE' in n:
-        return 'Copy/Print Room'
-    if 'CORRIDOR' in n or 'HALLWAY' in n:
-        # default width category if unknown
-        return 'Corridor/Transition >=8 ft wide'
-    if 'ELEC' in n or 'MECH' in n:
-        return 'Electrical/Mechanical'
-    if 'STOR' in n:
-        return 'Storage'
-    return 'Office - Enclosed'
+def prettify(elem) -> bytes:
+    """Return pretty-printed XML as bytes (UTF-8)."""
+    return minidom.parseString(tostring(elem)).toprettyxml(encoding="UTF-8")
 
-# ---------------- CSV Loaders ----------------
-def load_spaces(csv_text: str):
-    reader = csv.DictReader(StringIO(csv_text))
-    spaces = {}
-    for row in reader:
-        room = (row.get("room") or row.get("Room") or row.get("area_description") or row.get("Area") or "").strip()
-        area = (row.get("floor_area") or row.get("sqft") or row.get("Floor Area") or "").strip()
-        if not room or not area:
-            continue
-        try:
-            spaces[room] = float(area)
-        except:
-            pass
-    return spaces
+def validate_spaces_df(df: pd.DataFrame) -> list:
+    """Basic validations and user-friendly errors."""
+    required_cols = ["description","floorArea","activityType","lpd","allowanceType","allowanceFloorArea"]
+    missing = [c for c in required_cols if c not in df.columns]
+    errs = []
+    if missing:
+        errs.append(f"Spaces CSV missing required columns: {', '.join(missing)}")
 
-def load_fixtures(csv_text: str):
-    reader = csv.DictReader(StringIO(csv_text))
-    fixtures = defaultdict(lambda: defaultdict(int))
-    watts = {}
-    for row in reader:
-        room = (row.get("room") or row.get("Room") or "").strip()
-        fix = (row.get("fixture") or row.get("Fixture") or "").strip()
-        qty = (row.get("quantity") or row.get("qty") or "0").strip()
-        watt = (row.get("watt") or row.get("watts") or row.get("W") or "0").strip()
-        if room and fix:
-            try:
-                fixtures[room][fix] += int(float(qty))
-                watts[fix] = float(watt)
-            except:
-                continue
-    return fixtures, watts
+    if "floorArea" in df.columns and "allowanceFloorArea" in df.columns:
+        bad = df[(pd.to_numeric(df["allowanceFloorArea"], errors="coerce") >
+                  pd.to_numeric(df["floorArea"], errors="coerce"))]
+        if not bad.empty:
+            errs.append("Some rows have allowanceFloorArea > floorArea. Please correct those before export.")
 
-# ---------------- Builders ----------------
-def build_sections(spaces, fixtures, watt_map):
-    lines = []
+    return errs
 
-    # INTERIOR SPACE blocks
-    for idx, (room, sqft) in enumerate(spaces.items(), start=1):
-        stype = guess_type(room)
-        cat = CATEGORY_MAP[stype]
-        pd = float(DEFAULT_LPD[stype])
-        allowed_watts = int(round(float(sqft) * pd))
-        total_w = sum(q * float(watt_map.get(f, 0)) for f, q in fixtures.get(room, {}).items())
+def validate_fixtures_df(df: pd.DataFrame) -> list:
+    """Check fixture CSV integrity."""
+    if df.empty:
+        return []
+    required_cols = ["spaceDescription","description","lightingType","fixtureType","lampType","fixtureWattage","quantity"]
+    missing = [c for c in required_cols if c not in df.columns]
+    errs = []
+    if missing:
+        errs.append(f"Fixtures CSV missing required columns: {', '.join(missing)}")
+    return errs
 
-        lines += [
-            f"INTERIOR SPACE {idx} (",
-            f"  description = <|{room} ( Common Space Types:{stype} {int(round(sqft))} sq.ft.)|>",
-            "  space type = SPACE_INTERIOR_LIGHTING",
-            f"  space allowed wattage = {allowed_watts}",
-            f"  space prop wattage = {int(round(total_w))}",
-            f"  list position = {idx}",
-            "  allowance description = None",
-            "  allowance type = ALLOWANCE_NONE",
-            "  allowance floor area = 0",
-            "  rcr perimeter = 0",
-            "  rcr floor to workplane height = 0",
-            "  rcr workplane to luminaire height = 0",
-            f"  activity category number = {cat}",
-            ")"
-        ]
+def build_cxl(state:str,
+              city:str,
+              selected_code_label:str,
+              project_name:str,
+              owner_name:str,
+              notes:str,
+              spaces_df: pd.DataFrame,
+              fixtures_df: pd.DataFrame,
+              version_str: str = "24.1.6") -> bytes:
+    """
+    Build a COMcheck .cxl file from inputs (spaces + fixtures).
+    The structure tracks the schema used by COMcheck-Web.
+    """
 
-    # FIXTURE blocks (aggregated per space)
-    fid = len(spaces) + 1
-    for idx, room in enumerate(spaces, start=1):
-        for fix, qty in fixtures.get(room, {}).items():
-            w = int(round(float(watt_map.get(fix, 0))))
-            lines += [
-                f"FIXTURE {fid} (",
-                f"  list position = {idx}",
-                f"  luminaire type id = <|{fix}|>",
-                f"  quantity = {int(qty)}",
-                f"  watt input = {w}",
-                ")"
-            ]
-            fid += 1
+    # Root
+    root = E("building")
+    root.set("xmlns", NS)
+    root.set("xmlns:xs", "http://www.w3.org/2001/XMLSchema-instance")
 
-    # ACTIVITY USE blocks
-    for idx, (room, sqft) in enumerate(spaces.items(), start=1):
-        stype = guess_type(room)
-        pd = float(DEFAULT_LPD[stype])
-        lines += [
-            f"ACTIVITY USE {idx} (",
-            f"  key = {1000000000 + idx}",
-            f"  activity type = {ACTIVITY_TYPE[stype]}",
-            f"  activity description = <|Common Space Types:{stype}|>",
-            f"  area description = <|{room}|>",
-            f"  power density = {pd}",
-            "  internal load = 1.95",
-            "  ceiling height = 0",
-            f"  list position = {idx}",
-            "  construction type = NON_RESIDENTIAL",
-            f"  floor area = {int(round(sqft))}",
-            ")"
-        ]
+    # Required boilerplate
+    for k, v in [
+        ("projectType","NEW_CONSTRUCTION"),
+        ("bldgUseType","ACTIVITY"),
+        ("feetBldgHeight","0.000"),
+        ("isNonresidentialConditioning","true"),
+        ("isResidentialConditioning","false"),
+        ("isSemiheatedConditioning","false"),
+        ("conditioning","HEATING_AND_COOLING"),
+    ]:
+        E(k, v, root)
 
-    return lines
+    # Control (code/version/mode)
+    ctrl = E("control", parent=root)
+    E("code", CODE_TO_CONTROL.get(selected_code_label, "CEZ_IECC2018"), ctrl)
+    E("complianceMode", DEFAULT_COMPLIANCE_MODE, ctrl)
+    E("version", version_str, ctrl)
 
-def build_cck(spaces, fixtures, watt_map, filename):
-    # Stable ordering by room name
-    spaces = dict(sorted(spaces.items(), key=lambda x: x[0]))
-    body = "\n".join(build_sections(spaces, fixtures, watt_map))
-    return GENERIC_HEADER.rstrip() + "\n" + body + "\n" + GENERIC_TAIL.lstrip()
+    # Location
+    loc = E("location", parent=root)
+    E("state", state, loc)
+    E("city", city, loc)
 
-# ---------------- UI ----------------
-col1, col2 = st.columns(2)
-with col1:
-    spaces_file = st.file_uploader("Upload spaces.csv", type=["csv"])
-with col2:
-    fixtures_file = st.file_uploader("Upload fixtures.csv", type=["csv"])
+    # Project
+    proj = E("project", parent=root)
+    E("projectName", project_name, proj)
+    E("ownerName", owner_name, proj)
+    E("notes", notes, proj)
 
-outfile = st.text_input("Output file name", value="Generated_ComCheck.cck")
+    # Envelope (minimal, required by schema)
+    env = E("envelope", parent=root)
+    for k, v in [
+        ("useOrientDetails","true"),
+        ("useVltDetails","false"),
+        ("useCoolRoofPerformanceDetails","false"),
+        ("airBarrierComplianceType","AIR_BARRIER_OPTION_UNKNOWN"),
+        ("applyWindowPctAllowanceForDaylighting","false"),
+        ("applySkylightPctAllowanceForDaylighting","false"),
+    ]:
+        E(k, v, env)
 
-# Sample files
-st.markdown("---")
-st.subheader("Sample CSVs")
-sample_spaces = "room,floor_area\nOPEN DESK AREA - 17A01,830\nPhone 17B05,89\nLarge Office 17A05,215\nOffice 17A04,155\n"
-sample_fixtures = "room,fixture,quantity,watt\nOPEN DESK AREA - 17A01,DL-8W,40,8\nOPEN DESK AREA - 17A01,PEND-30W,10,30\nPhone 17B05,DL-8W,4,8\nLarge Office 17A05,DL-8W,16,8\nOffice 17A04,DL-8W,12,8\n"
-st.download_button("Download sample spaces.csv", data=sample_spaces, file_name="spaces_sample.csv", mime="text/csv")
-st.download_button("Download sample fixtures.csv", data=sample_fixtures, file_name="fixtures_sample.csv", mime="text/csv")
+    # Lighting container
+    lighting = E("lighting", parent=root)
+    E("exteriorLightingZone","0", lighting)
+    E("exteriorLightingZoneType","EXT_ZONE_UNSPECIFIED", lighting)
 
-st.markdown("---")
-if st.button("Generate .cck") and spaces_file and fixtures_file and outfile.strip():
-    try:
-        spaces = load_spaces(spaces_file.getvalue().decode("utf-8-sig"))
-        fixtures, watt_map = load_fixtures(fixtures_file.getvalue().decode("utf-8-sig"))
-        if not spaces:
-            st.error("No valid rows found in spaces.csv (need columns: room,floor_area).")
-        else:
-            cck_text = build_cck(spaces, fixtures, watt_map, outfile.strip())
-            # Basic validation: ensure unique list positions by count
-            if len(spaces) != len(set(range(1, len(spaces)+1))):
-                st.warning("List positions might be misaligned — please check.")
-            st.success("COMcheck file generated.")
-            st.download_button("Download COMcheck .cck", data=cck_text, file_name=outfile.strip(), mime="text/plain")
-            st.code(cck_text[:2000])
-    except Exception as e:
-        st.error(f"Error: {e}")
-elif st.button("Generate .cck") and not (spaces_file and fixtures_file):
-    st.error("Please upload both spaces.csv and fixtures.csv.")
+    # Space-by-space structure
+    wb = E("wholeBldgUses", parent=lighting)
+    w = E("wholeBldgUse", parent=wb)
+    for k, v in [
+        ("wholeBldgType","WHOLE_BUILDING_INVALID_USE"),
+        ("key","1"),
+        ("powerDensity","0"),
+        ("internalLoad","0"),
+        ("ceilingHeight","0"),
+        ("listPosition","1"),
+        ("constructionType","NON_RESIDENTIAL"),
+        ("floorArea","0"),
+    ]:
+        E(k, v, w)
+
+    # Build a map of fixtures keyed by spaceDescription
+    fixtures_by_space = {}
+    if not fixtures_df.empty:
+        for _, row in fixtures_df.iterrows():
+            key = str(row["spaceDescription"]).strip()
+            fixtures_by_space.setdefault(key, []).append(row)
+
+    # Write each interiorLightingSpace and attach fixtures
+    for _, sp in spaces_df.iterrows():
+        ils = E("interiorLightingSpace", parent=w)
+        desc = str(sp["description"]).strip()
+        E("description", desc, ils)
+        E("allowanceType", str(sp["allowanceType"]).strip(), ils)
+        E("allowanceFloorArea", str(sp["allowanceFloorArea"]).strip(), ils)
+        E("floorArea", str(sp["floorArea"]).strip(), ils)
+
+        # optional fixtures
+        for fx in fixtures_by_space.get(desc, []):
+            lf = E("lightingFixture", parent=ils)
+            for tag in ["description","lightingType","fixtureType","lampType","fixtureWattage","quantity"]:
+                val = fx[tag]
+                E(tag, str(val).strip(), lf)
+
+    # LPD table (activityUses) — one row per space
+    aus = E("activityUses", parent=lighting)
+    for _, sp in spaces_df.iterrows():
+        au = E("activityUse", parent=aus)
+        desc = str(sp["description"]).strip()
+        E("key", desc, au)
+        E("activityType", str(sp["activityType"]).strip(), au)
+        E("activityDescription", desc, au)
+        E("areaDescription", desc, au)
+        E("powerDensity", str(sp["lpd"]).strip(), au)
+
+    # Requirements (minimal)
+    req = E("requirements", parent=root)
+    E("energyCode", CODE_TO_CONTROL.get(selected_code_label, "CEZ_IECC2018"), req)
+    E("softwareVersion", version_str, req)
+
+    return prettify(root)
+
+# -----------------------
+# UI
+# -----------------------
+st.set_page_config(page_title="COMcheck CXL Generator", page_icon="💡", layout="centered")
+st.title("COMcheck CXL Generator 💡")
+st.caption("Build a space-by-space COMcheck **.cxl** (with allowances + LPDs) from CSVs.")
+
+with st.expander("1) Select code & project details", expanded=True):
+    colA, colB = st.columns(2)
+    code_label = colA.selectbox("COMcheck code / jurisdiction", COMCHECK_CODES, index=COMCHECK_CODES.index("NYC Energy Conservation Code (NYCECC)") if "NYC Energy Conservation Code (NYCECC)" in COMCHECK_CODES else 0)
+    version_str = colB.text_input("Target COMcheck software version", value="24.1.6", help="Leave as-is unless you need to match a specific exported file.")
+
+    state = colA.text_input("State", value="New York")
+    city = colB.text_input("City", value="New York")
+    project_name = st.text_input("Project name", value="Sample Project")
+    owner_name = st.text_input("Owner / Client", value="")
+    notes = st.text_area("Notes", value="Generated via Streamlit")
+
+with st.expander("2) Upload CSVs (Spaces & Fixtures)", expanded=True):
+    st.markdown("**Spaces CSV columns (required):** `description, floorArea, activityType, lpd, allowanceType, allowanceFloorArea`")
+    st.markdown("**Fixtures CSV columns (optional):** `spaceDescription, description, lightingType, fixtureType, lampType, fixtureWattage, quantity`")
+    st.markdown(
+        "- Download samples: "
+        "[spaces_sample.csv](sandbox:/mnt/data/spaces_sample.csv) · "
+        "[fixtures_sample.csv](sandbox:/mnt/data/fixtures_sample.csv)"
+    )
+
+    spaces_file = st.file_uploader("Upload Spaces CSV", type=["csv"], accept_multiple_files=False)
+    fixtures_file = st.file_uploader("Upload Fixtures CSV (optional)", type=["csv"], accept_multiple_files=False)
+
+    spaces_df = pd.DataFrame()
+    fixtures_df = pd.DataFrame()
+
+    if spaces_file:
+        spaces_df = pd.read_csv(spaces_file)
+        st.write("Spaces preview:", spaces_df.head(10))
+        errs = validate_spaces_df(spaces_df)
+        if errs:
+            st.error(" • ".join(errs))
+
+    if fixtures_file:
+        fixtures_df = pd.read_csv(fixtures_file)
+        st.write("Fixtures preview:", fixtures_df.head(10))
+        ferrs = validate_fixtures_df(fixtures_df)
+        if ferrs:
+            st.error(" • ".join(ferrs))
+
+with st.expander("3) Generate .cxl", expanded=True):
+    disabled = spaces_df.empty or (len(validate_spaces_df(spaces_df)) > 0)
+    if st.button("Generate .cxl", disabled=disabled):
+        xml_bytes = build_cxl(
+            state=state,
+            city=city,
+            selected_code_label=code_label,
+            project_name=project_name,
+            owner_name=owner_name,
+            notes=notes,
+            spaces_df=spaces_df,
+            fixtures_df=fixtures_df,
+            version_str=version_str,
+        )
+        st.download_button(
+            label="Download CXL",
+            data=xml_bytes,
+            file_name=f"{project_name.replace(' ','_')}.cxl",
+            mime="application/xml",
+        )
+        st.success("CXL ready! Import this file into COMcheck-Web via Project → Import.")
